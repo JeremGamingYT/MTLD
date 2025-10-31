@@ -56,7 +56,7 @@ class Config:
     # [M3 COMPAT] Les chemins ont été modifiés pour être relatifs au script.
     # Assurez-vous de créer un dossier 'dataset/anima-s-dataset' à côté de votre script
     # et de placer vos images dedans.
-    DATASET_PATH = "./dataset/anima-s-dataset/"
+    DATASET_PATH = "/Users/jeremgaming/.cache/kagglehub/datasets/jeremgaming099/anima-s-dataset/versions/2/test"
     
     # Nombre total d'images dans votre séquence.
     # Le code essaiera de le déduire, mais vous pouvez le forcer ici.
@@ -450,19 +450,19 @@ if __name__ == '__main__':
     # 3. Choisissez UN SEUL mode d'exécution ci-dessous en dé-commentant les lignes.
 
     # --- MODE 1: ENTRAÎNEMENT SUR VOS DONNÉES ---
-    # print("\n--- MODE ENTRAÎNEMENT ---")
-    # train_mtld()
+    print("\n--- MODE ENTRAÎNEMENT ---")
+    train_mtld()
 
     # --- MODE 2: GÉNÉRATION À PARTIR D'UN MODÈLE ENTRAÎNÉ ---
-    print("\n--- MODE GÉNÉRATION ---")
-    config_gen = Config()
+    #print("\n--- MODE GÉNÉRATION ---")
+    #config_gen = Config()
     # [M3 COMPAT] Le chemin du modèle est maintenant relatif et pointe vers le dossier de sauvegarde.
     # Assurez-vous que ce fichier existe bien dans ./models_mtld_v1.2/
-    model_file = os.path.join(config_gen.MODEL_SAVE_PATH, "mtld_v1.1_epoch_120.pth") 
+    #model_file = os.path.join(config_gen.MODEL_SAVE_PATH, "mtld_v1.1_epoch_120.pth") 
     
     # [M3 COMPAT] Le chemin de l'image d'amorce est également relatif.
     # Assurez-vous que cette image existe bien dans votre dossier de dataset.
-    priming_image = os.path.join(config_gen.DATASET_PATH, "frame_0001.png")
-    priming_index = 1 # L'index doit correspondre à l'image (frame_0001.png -> index 1)
+    #priming_image = os.path.join(config_gen.DATASET_PATH, "frame_0001.png")
+    #priming_index = 1 # L'index doit correspondre à l'image (frame_0001.png -> index 1)
     
-    generate_sequence(model_file, priming_image, priming_index, config_gen)
+    #generate_sequence(model_file, priming_image, priming_index, config_gen)
