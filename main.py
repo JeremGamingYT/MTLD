@@ -2,7 +2,7 @@
 """
 MTLD: Modèle à Trajectoire Latente Déterministe pour la Restitution Séquentielle d'Anime
 
-Version: 1.2 (Adaptation pour macOS Apple Silicon M3)
+Version: 1.3 (Correction OOM sur M3 + Accumulation de Gradient)
 Auteur: Votre Expert en IA
 Date: 30 octobre 2025
 Description:
@@ -11,8 +11,9 @@ Ce modèle est spécifiquement conçu pour apprendre une trajectoire séquentiel
 image d'amorce. Il remplace l'approche VAE/Transformer par un système Encodeur-Décodeur
 déterministe couplé à un générateur de trajectoire latente basé sur un GRU et un
 embedding temporel.
-Cette version a été adaptée pour une exécution native sur les puces Apple Silicon (M1/M2/M3)
-en utilisant le backend Metal Performance Shaders (MPS) de PyTorch.
+Cette version intègre l'accumulation de gradient pour résoudre les erreurs "Out of Memory"
+sur les puces Apple Silicon M3, tout en simulant un batch size plus grand pour la
+stabilité de l'entraînement. Elle détecte aussi automatiquement le nombre d'images.
 """
 
 # --- 1. Importations et Configuration ---
@@ -47,27 +48,30 @@ except ImportError:
     print("="*80)
     exit()
 
+# [M3 OPTIM] Détection automatique du nombre d'images avant de définir la configuration.
+def get_total_frames(path):
+    image_paths = sorted(glob.glob(os.path.join(path, "*.png")))
+    if not image_paths:
+        print(f"AVERTISSEMENT: Aucun fichier .png trouvé dans '{path}'. Le script risque d'échouer.")
+        return 0
+    return len(image_paths)
+
 class Config:
     """
     Configuration centralisée pour le modèle MTLD.
     Modifiez ces valeurs pour adapter l'entraînement à vos besoins.
     """
     # --- Chemins et Données ---
-    # [M3 COMPAT] Les chemins ont été modifiés pour être relatifs au script.
-    # Assurez-vous de créer un dossier 'dataset/anima-s-dataset' à côté de votre script
-    # et de placer vos images dedans.
-    DATASET_PATH = "/Users/jeremgaming/.cache/kagglehub/datasets/jeremgaming099/anima-s-dataset/versions/2/test"
+    DATASET_PATH = "/Users/jeremgaming/.cache/kagglehub/datasets/jeremgaming099/anima-s-dataset/versions/2"
     
-    # Nombre total d'images dans votre séquence.
-    # Le code essaiera de le déduire, mais vous pouvez le forcer ici.
-    TOTAL_SEQUENCE_FRAMES = 465 
+    # [M3 OPTIM] Le nombre de frames est maintenant déterminé automatiquement.
+    TOTAL_SEQUENCE_FRAMES = get_total_frames(DATASET_PATH)
     
     # Taille des images pour l'entraînement
     IMG_SIZE = 256
     IMG_CHANNELS = 3
     
     # Longueur des sous-séquences utilisées pour chaque étape d'entraînement.
-    # Une valeur plus grande capture plus de dynamique temporelle mais consomme plus de VRAM.
     TRAINING_SEQUENCE_LENGTH = 32
 
     # --- Architecture du Modèle ---
@@ -76,10 +80,11 @@ class Config:
 
     # --- Paramètres d'Entraînement ---
     EPOCHS = 150
-    # [M3 COMPAT] BATCH_SIZE réduit de 4 à 2 pour s'adapter à la mémoire unifiée
-    # de 16Go (en visant une utilisation sous 10Go) et éviter les erreurs de mémoire.
-    # Si vous rencontrez encore des problèmes, essayez de le passer à 1.
-    BATCH_SIZE = 2
+    # [M3 OPTIM] BATCH_SIZE est réduit à 1, la mesure la plus efficace pour réduire la consommation de mémoire.
+    BATCH_SIZE = 1
+    # [M3 OPTIM] Nous introduisons l'accumulation de gradient pour simuler un batch size plus grand.
+    # Le batch size effectif sera BATCH_SIZE * ACCUMULATION_STEPS (1 * 4 = 4).
+    ACCUMULATION_STEPS = 4
     LEARNING_RATE_G = 2e-4
     LEARNING_RATE_D = 4e-4
     BETA1 = 0.5
@@ -93,8 +98,6 @@ class Config:
     LAMBDA_FM = 10.0
 
     # --- Environnement et Sauvegarde ---
-    # [M3 COMPAT] Détection automatique du device. Priorise le backend 'mps' pour
-    # Apple Silicon, puis 'cuda' pour NVIDIA, et enfin 'cpu'.
     if torch.backends.mps.is_available():
         DEVICE = "mps"
     elif torch.cuda.is_available():
@@ -102,14 +105,9 @@ class Config:
     else:
         DEVICE = "cpu"
         
-    # [M3 COMPAT] NUM_WORKERS mis à 0. L'utilisation de plusieurs workers avec le
-    # backend 'mps' peut parfois entraîner des instabilités ou des goulots d'étranglement.
-    # 0 est l'option la plus sûre et la plus stable sur macOS.
     NUM_WORKERS = 0
-    
-    # [M3 COMPAT] Les chemins de sauvegarde sont maintenant relatifs.
-    MODEL_SAVE_PATH = "./models_mtld_v1.2/"
-    OUTPUT_SAVE_PATH = "./outputs_mtld_v1.2/"
+    MODEL_SAVE_PATH = "./models_mtld_v1.3/"
+    OUTPUT_SAVE_PATH = "./outputs_mtld_v1.3/"
     SAVE_EPOCH_INTERVAL = 10
 
 # --- 2. Préparation des Données (logique inchangée) ---
@@ -144,10 +142,12 @@ class AnimeFrameDataset(Dataset):
             raise FileNotFoundError(f"Aucune image .png trouvée dans {root_dir}. Vérifiez le chemin dans la classe Config.")
         self.num_images = len(self.image_paths)
         if self.num_images != total_frames:
+             # Cet avertissement ne devrait plus apparaître grâce à la détection auto.
              print(f"AVERTISSEMENT: Config.TOTAL_SEQUENCE_FRAMES={total_frames} mais {self.num_images} images trouvées.")
              self.total_frames = self.num_images
         else:
-            self.total_frames = total_frames
+             self.total_frames = total_frames
+             print(f"{self.total_frames} images trouvées et chargées.")
     def __len__(self):
         return self.num_images - self.sequence_length + 1
     def __getitem__(self, idx):
@@ -174,8 +174,6 @@ def get_dataloader(config):
         batch_size=config.BATCH_SIZE, 
         shuffle=True, 
         num_workers=config.NUM_WORKERS, 
-        # [M3 COMPAT] pin_memory est une optimisation spécifique à CUDA. Elle est
-        # désactivée car non pertinente et potentiellement contre-productive sur MPS.
         pin_memory=False, 
         drop_last=True
     )
@@ -277,16 +275,17 @@ class MTLD(nn.Module):
         )
         self.discriminator = PatchDiscriminator(config.IMG_CHANNELS)
 
-# --- 4. Boucle d'Entraînement (logique inchangée) ---
+# --- 4. Boucle d'Entraînement (modifiée pour l'accumulation de gradient) ---
 
 def train_mtld():
     config = Config()
+    if config.TOTAL_SEQUENCE_FRAMES == 0:
+        print("Arrêt de l'entraînement car aucune image n'a été trouvée.")
+        return
+        
     print(f"Utilisation du device : {config.DEVICE.upper()}")
     os.makedirs(config.MODEL_SAVE_PATH, exist_ok=True)
     os.makedirs(config.OUTPUT_SAVE_PATH, exist_ok=True)
-    
-    # Dé-commentez la ligne suivante si vous voulez générer un jeu de données factice
-    # setup_dummy_dataset(config.DATASET_PATH, config.TOTAL_SEQUENCE_FRAMES, config.IMG_SIZE)
     
     dataloader = get_dataloader(config)
     model = MTLD(config).to(config.DEVICE)
@@ -304,6 +303,11 @@ def train_mtld():
     print("Début de l'entraînement...")
     for epoch in range(config.EPOCHS):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.EPOCHS}")
+        
+        # [M3 OPTIM] Réinitialisation des optimiseurs au début de chaque époque
+        opt_g.zero_grad()
+        opt_d.zero_grad()
+        
         for i, (real_seq_imgs, start_indices) in enumerate(pbar):
             real_seq_imgs = real_seq_imgs.to(config.DEVICE)
             start_indices = start_indices.to(config.DEVICE)
@@ -311,7 +315,6 @@ def train_mtld():
             real_imgs_flat = real_seq_imgs.view(b * s, c, h, w)
             
             # --- Entraînement du Générateur ---
-            opt_g.zero_grad()
             with torch.no_grad():
                 z_true_flat = model.encoder(real_imgs_flat)
             z_true = z_true_flat.view(b, s, -1)
@@ -338,11 +341,11 @@ def train_mtld():
                       config.LAMBDA_ADV * loss_adv +
                       config.LAMBDA_FM * loss_fm)
             
+            # [M3 OPTIM] Normalisation de la loss pour l'accumulation
+            loss_g = loss_g / config.ACCUMULATION_STEPS
             loss_g.backward()
-            opt_g.step()
             
             # --- Entraînement du Discriminateur ---
-            opt_d.zero_grad()
             real_d_output, _ = model.discriminator(real_imgs_flat)
             loss_d_real = loss_mse(real_d_output, target_real)
             
@@ -351,21 +354,30 @@ def train_mtld():
             loss_d_fake = loss_mse(fake_d_output, target_fake)
             
             loss_d = 0.5 * (loss_d_real + loss_d_fake)
+            # [M3 OPTIM] Normalisation de la loss pour l'accumulation
+            loss_d = loss_d / config.ACCUMULATION_STEPS
             loss_d.backward()
-            opt_d.step()
             
+            # [M3 OPTIM] Mise à jour des poids seulement après N étapes d'accumulation
+            if (i + 1) % config.ACCUMULATION_STEPS == 0:
+                opt_g.step()
+                opt_d.step()
+                opt_g.zero_grad()
+                opt_d.zero_grad()
+
             pbar.set_postfix({
                 "L_Rec_L1": f"{loss_rec_l1.item():.3f}", "L_Latent": f"{loss_latent.item():.3f}",
-                "L_Adv": f"{loss_adv.item():.3f}", "L_D": f"{loss_d.item():.3f}",
+                "L_Adv": f"{loss_adv.item():.3f}", "L_D": f"{loss_d.item() * config.ACCUMULATION_STEPS:.3f}", # Affichage de la loss non normalisée
             })
             
         if (epoch + 1) % config.SAVE_EPOCH_INTERVAL == 0:
-            save_path = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v1.2_epoch_{epoch+1}.pth")
+            save_path = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v1.3_epoch_{epoch+1}.pth")
             torch.save(model.state_dict(), save_path)
             print(f"\nModèle sauvegardé : {save_path}")
             
             with torch.no_grad():
                 model.eval()
+                # Utilise la dernière séquence du dataloader pour la sauvegarde
                 real_sample = real_seq_imgs[0].unsqueeze(0)
                 start_idx_sample = start_indices[0].unsqueeze(0)
                 z_pred_sample = model.trajectory_generator(start_idx_sample, max_len=s)
@@ -383,12 +395,16 @@ def train_mtld():
 
 def generate_sequence(model_path, priming_image_path, priming_frame_index, config):
     print("--- Démarrage de la Génération de Séquence ---")
+    if config.TOTAL_SEQUENCE_FRAMES == 0:
+        print("Opération annulée car aucune image n'a été trouvée dans la configuration.")
+        return
+        
     if not os.path.exists(model_path):
         print(f"ERREUR : Fichier modèle non trouvé à {model_path}"); return
     if not os.path.exists(priming_image_path):
         print(f"ERREUR : Image d'amorce non trouvée à {priming_image_path}"); return
     if not (0 <= priming_frame_index < config.TOTAL_SEQUENCE_FRAMES):
-        print(f"ERREUR : L'index d'amorce {priming_frame_index} est invalide."); return
+        print(f"ERREUR : L'index d'amorce {priming_frame_index} est invalide pour une séquence de {config.TOTAL_SEQUENCE_FRAMES} images."); return
 
     output_dir_frames = os.path.join(config.OUTPUT_SAVE_PATH, "generated_frames")
     os.makedirs(output_dir_frames, exist_ok=True)
@@ -445,24 +461,16 @@ def generate_sequence(model_path, priming_image_path, priming_frame_index, confi
 
 if __name__ == '__main__':
     # --- Instructions d'Utilisation ---
-    # 1. Assurez-vous d'avoir configuré les chemins dans la classe `Config`.
-    # 2. Vérifiez que la structure des dossiers (dataset, models) est correcte.
-    # 3. Choisissez UN SEUL mode d'exécution ci-dessous en dé-commentant les lignes.
+    # Dé-commentez le mode que vous souhaitez exécuter.
 
     # --- MODE 1: ENTRAÎNEMENT SUR VOS DONNÉES ---
     print("\n--- MODE ENTRAÎNEMENT ---")
     train_mtld()
 
     # --- MODE 2: GÉNÉRATION À PARTIR D'UN MODÈLE ENTRAÎNÉ ---
-    #print("\n--- MODE GÉNÉRATION ---")
-    #config_gen = Config()
-    # [M3 COMPAT] Le chemin du modèle est maintenant relatif et pointe vers le dossier de sauvegarde.
-    # Assurez-vous que ce fichier existe bien dans ./models_mtld_v1.2/
-    #model_file = os.path.join(config_gen.MODEL_SAVE_PATH, "mtld_v1.1_epoch_120.pth") 
-    
-    # [M3 COMPAT] Le chemin de l'image d'amorce est également relatif.
-    # Assurez-vous que cette image existe bien dans votre dossier de dataset.
-    #priming_image = os.path.join(config_gen.DATASET_PATH, "frame_0001.png")
-    #priming_index = 1 # L'index doit correspondre à l'image (frame_0001.png -> index 1)
-    
-    #generate_sequence(model_file, priming_image, priming_index, config_gen)
+    # print("\n--- MODE GÉNÉRATION ---")
+    # config_gen = Config()
+    # model_file = os.path.join(config_gen.MODEL_SAVE_PATH, "mtld_v1.3_epoch_150.pth") 
+    # priming_image = os.path.join(config_gen.DATASET_PATH, "frame_0001.png")
+    # priming_index = 1
+    # generate_sequence(model_file, priming_image, priming_index, config_gen)
