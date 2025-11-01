@@ -1,0 +1,13 @@
+animes_dataset.zip
+animes_dataset/
+data-later/
+models_mtld_v1.7/
+outputs_mtld_v1.7/
+models_mtld_v1.5/
+outputs_mtld_v1.5/
+models_mtld_v1.7_ddp/
+videos/
+videos_raw/
+.venv/
+.venv
+*.pth

@@ -15,7 +15,7 @@ temporelle, ce qui est essentiel pour la qualité de l'apprentissage du modèle.
 L'architecture du modèle et la logique d'entraînement restent inchangées.
 """
 
-# --- 1. Importations et Configuration (inchangés) ---
+# --- 1. Importations et Configuration ---
 
 import os
 import glob
@@ -32,6 +32,10 @@ from tqdm import tqdm
 import math
 import shutil
 import warnings
+# AJUSTEMENT: Importation des outils pour l'entraînement en précision mixte (AMP)
+# RAISON: Accélère l'entraînement et réduit l'utilisation de la VRAM sur les cartes NVIDIA récentes.
+from torch.cuda.amp import GradScaler, autocast
+
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -42,14 +46,31 @@ except ImportError:
 
 class Config:
     # MODIFIÉ: Le chemin pointe maintenant vers le dossier parent contenant les arcs
-    DATASET_PATH = "/root/.cache/kagglehub/datasets/jeremgaming099/anima-s-dataset/versions/4/animes_dataset" # Exemple: /path/to/your/dataset/
-    IMG_SIZE = 256
+    DATASET_PATH = "animes_dataset" # Exemple: /path/to/your/dataset/
+    
+    # AJUSTEMENT: Réduction de la taille de l'image de 256x256 à 128x128.
+    # RAISON: Réduit considérablement l'utilisation de la VRAM (d'un facteur 4 pour les activations).
+    # C'est l'ajustement le plus important pour une carte avec 10 Go de VRAM.
+    # NOTE: Cela réduira la résolution des images générées, mais garantit que l'entraînement est possible.
+    IMG_SIZE = 128
+    
     IMG_CHANNELS = 3
-    TRAINING_SEQUENCE_LENGTH = 32
+    
+    # AJUSTEMENT: Réduction de la longueur de la séquence de 32 à 16.
+    # RAISON: Divise par deux la mémoire nécessaire pour traiter une séquence,
+    # ce qui allège la charge sur la VRAM et le modèle récurrent (GRU).
+    TRAINING_SEQUENCE_LENGTH = 16
+    
     LATENT_DIM = 256
     GRU_HIDDEN_DIM = 512
     EPOCHS = 200
-    BATCH_SIZE = 4
+    
+    # AJUSTEMENT: Réduction de la taille du lot (batch size) de 4 à 2.
+    # RAISON: Diminue directement la quantité de données traitées simultanément par le GPU.
+    # C'est un paramètre crucial pour contrôler l'utilisation de la VRAM.
+    # NOTE: Si vous rencontrez toujours des erreurs "out of memory", essayez de le passer à 1.
+    BATCH_SIZE = 2
+    
     LEARNING_RATE_G = 2e-4
     LEARNING_RATE_D = 4e-4
     BETA1 = 0.5
@@ -60,14 +81,19 @@ class Config:
     LAMBDA_ADV = 1.0
     LAMBDA_FM = 10.0
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # AJUSTEMENT: NUM_WORKERS à 2 est un choix sûr pour un PC de bureau.
+    # RAISON: Utilise des processus CPU supplémentaires pour charger les données sans surcharger le système.
+    # Avec 12 Go de RAM disponible, c'est une valeur prudente qui n'entraînera pas de surconsommation de RAM.
     NUM_WORKERS = 2
+    
     MODEL_SAVE_PATH = "./models_mtld_v1.5/"
     OUTPUT_SAVE_PATH = "./outputs_mtld_v1.5/"
     SAVE_EPOCH_INTERVAL = 10
     RESUME_TRAINING = False
     CHECKPOINT_TO_RESUME = ""
 
-# --- 2. Préparation des Données (MODIFIÉE pour la nouvelle structure) ---
+# --- 2. Préparation des Données (inchangée) ---
 
 class AnimeFrameDataset(Dataset):
     """
@@ -174,9 +200,14 @@ class Encoder(nn.Module):
             nn.Conv2d(128, 256, 4, 2, 1, bias=False), nn.InstanceNorm2d(256), nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(256, 512, 4, 2, 1, bias=False), nn.InstanceNorm2d(512), nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(512, 1024, 4, 2, 1, bias=False), nn.InstanceNorm2d(1024), nn.LeakyReLU(0.2, inplace=True),
+            # AJUSTEMENT: La taille de l'entrée de cette couche dépend de IMG_SIZE.
+            # Pour IMG_SIZE=128, la carte de features est 2x2. Pour 256, elle est 4x4.
+            # L'architecture actuelle s'adapte en changeant le Linear suivant.
             nn.Conv2d(1024, 1024, 4, 2, 1, bias=False), nn.InstanceNorm2d(1024), nn.LeakyReLU(0.2, inplace=True),
             nn.Flatten(),
-            nn.Linear(1024 * 4 * 4, latent_dim)
+            # AJUSTEMENT: Calcul automatique de la taille pour la couche linéaire.
+            # Cela rend le code robuste aux changements de IMG_SIZE.
+            nn.Linear(1024 * (config.IMG_SIZE // 64) * (config.IMG_SIZE // 64), latent_dim)
         )
     def forward(self, x):
         return self.model(x)
@@ -184,7 +215,9 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
     def __init__(self, latent_dim, out_channels):
         super().__init__()
-        self.decoder_input = nn.Linear(latent_dim, 1024 * 4 * 4)
+        # AJUSTEMENT: La sortie de cette couche doit correspondre à l'entrée de la suivante.
+        self.decoder_input_size = 1024 * (config.IMG_SIZE // 64) * (config.IMG_SIZE // 64)
+        self.decoder_input = nn.Linear(latent_dim, self.decoder_input_size)
         self.model = nn.Sequential(
             nn.ConvTranspose2d(1024, 1024, 4, 2, 1, bias=False), nn.InstanceNorm2d(1024), nn.ReLU(True),
             nn.ConvTranspose2d(1024, 512, 4, 2, 1, bias=False), nn.InstanceNorm2d(512), nn.ReLU(True),
@@ -199,7 +232,9 @@ class Decoder(nn.Module):
             b, s, d = z.shape
             z = z.view(b * s, d)
         x = self.decoder_input(z)
-        x = x.view(-1, 1024, 4, 4)
+        # AJUSTEMENT: La taille du reshape doit correspondre à la nouvelle IMG_SIZE
+        feature_map_size = config.IMG_SIZE // 64
+        x = x.view(-1, 1024, feature_map_size, feature_map_size)
         img = self.model(x)
         if is_sequence:
             _, c, h, w = img.shape
@@ -267,10 +302,10 @@ class MTLD(nn.Module):
         )
         self.discriminator = PatchDiscriminator(config.IMG_CHANNELS)
 
-# --- 4. Boucle d'Entraînement (inchangée) ---
+# --- 4. Boucle d'Entraînement (AJUSTÉE pour la performance) ---
 
 def train_mtld():
-    config = Config()
+    config = Config() # Utilisation de l'instance de configuration locale
     print(f"Utilisation du device : {config.DEVICE}")
     os.makedirs(config.MODEL_SAVE_PATH, exist_ok=True)
     os.makedirs(config.OUTPUT_SAVE_PATH, exist_ok=True)
@@ -288,6 +323,12 @@ def train_mtld():
     loss_mse = nn.MSELoss()
     loss_lpips_vgg = lpips.LPIPS(net='vgg').to(config.DEVICE)
     
+    # AJUSTEMENT: Initialisation des GradScalers pour la précision mixte.
+    # RAISON: Gère la mise à l'échelle des gradients pour éviter les problèmes de "underflow"
+    # lors de l'utilisation de Tensors float16, ce qui est essentiel pour l'AMP.
+    scaler_g = GradScaler()
+    scaler_d = GradScaler()
+    
     start_epoch = 0
     
     print("Début de l'entraînement du modèle conditionnel...")
@@ -300,48 +341,67 @@ def train_mtld():
             priming_img = real_seq_imgs[:, 0, :, :, :]
             future_imgs = real_seq_imgs[:, 1:, :, :, :]
             
+            # --- Entraînement du Générateur ---
             opt_g.zero_grad()
             
-            with torch.no_grad():
-                z_start_true = model.encoder(priming_img)
-                z_future_true = model.encoder(future_imgs.reshape(-1, c, h, w)).view(b, s - 1, -1)
+            # AJUSTEMENT: Utilisation de autocast pour le forward pass du générateur.
+            # RAISON: Exécute les opérations dans un format plus efficace (float16)
+            # pour réduire l'utilisation de la VRAM et augmenter la vitesse.
+            with autocast(enabled=(config.DEVICE == "cuda")):
+                with torch.no_grad():
+                    z_start_true = model.encoder(priming_img)
+                    z_future_true = model.encoder(future_imgs.reshape(-1, c, h, w)).view(b, s - 1, -1)
 
-            z_future_pred = model.trajectory_generator(z_start_true, max_len=s - 1)
-            
-            z_pred_full_seq = torch.cat([z_start_true.unsqueeze(1), z_future_pred], dim=1)
-            fake_seq_imgs = model.decoder(z_pred_full_seq)
+                z_future_pred = model.trajectory_generator(z_start_true, max_len=s - 1)
+                
+                z_pred_full_seq = torch.cat([z_start_true.unsqueeze(1), z_future_pred], dim=1)
+                fake_seq_imgs = model.decoder(z_pred_full_seq)
 
-            fake_imgs_flat = fake_seq_imgs.view(b * s, c, h, w)
-            real_imgs_flat = real_seq_imgs.view(b * s, c, h, w)
-            
-            loss_latent = loss_mse(z_future_pred, z_future_true)
-            loss_rec_l1 = loss_l1(fake_seq_imgs, real_seq_imgs)
-            loss_rec_lpips = loss_lpips_vgg(fake_imgs_flat, real_imgs_flat).mean()
+                fake_imgs_flat = fake_seq_imgs.view(b * s, c, h, w)
+                real_imgs_flat = real_seq_imgs.view(b * s, c, h, w)
+                
+                loss_latent = loss_mse(z_future_pred, z_future_true)
+                loss_rec_l1 = loss_l1(fake_seq_imgs, real_seq_imgs)
+                loss_rec_lpips = loss_lpips_vgg(fake_imgs_flat, real_imgs_flat).mean()
 
-            fake_d_output, _ = model.discriminator(fake_imgs_flat)
-            target_real = torch.ones_like(fake_d_output)
-            loss_adv = loss_mse(fake_d_output, target_real)
-            _, real_features = model.discriminator(real_imgs_flat.detach(), extract_features=True)
-            _, fake_features = model.discriminator(fake_imgs_flat, extract_features=True)
-            loss_fm = sum(loss_l1(fake_f, real_f.detach()) for real_f, fake_f in zip(real_features, fake_features))
+                fake_d_output, _ = model.discriminator(fake_imgs_flat)
+                target_real = torch.ones_like(fake_d_output)
+                loss_adv = loss_mse(fake_d_output, target_real)
+                
+                # Le calcul de la perte FM nécessite des forward pass séparés
+                _, real_features = model.discriminator(real_imgs_flat.detach(), extract_features=True)
+                _, fake_features = model.discriminator(fake_imgs_flat, extract_features=True)
+                loss_fm = sum(loss_l1(fake_f, real_f.detach()) for real_f, fake_f in zip(real_features, fake_features))
+                
+                loss_g = (config.LAMBDA_REC_L1 * loss_rec_l1 +
+                          config.LAMBDA_REC_LPIPS * loss_rec_lpips +
+                          config.LAMBDA_LATENT * loss_latent +
+                          config.LAMBDA_ADV * loss_adv +
+                          config.LAMBDA_FM * loss_fm)
+
+            # AJUSTEMENT: Mise à l'échelle de la perte et rétropropagation avec le scaler.
+            scaler_g.scale(loss_g).backward()
+            scaler_g.step(opt_g)
+            scaler_g.update()
             
-            loss_g = (config.LAMBDA_REC_L1 * loss_rec_l1 +
-                      config.LAMBDA_REC_LPIPS * loss_rec_lpips +
-                      config.LAMBDA_LATENT * loss_latent +
-                      config.LAMBDA_ADV * loss_adv +
-                      config.LAMBDA_FM * loss_fm)
-            loss_g.backward()
-            opt_g.step()
-            
+            # --- Entraînement du Discriminateur ---
             opt_d.zero_grad()
-            real_d_output, _ = model.discriminator(real_imgs_flat)
-            loss_d_real = loss_mse(real_d_output, target_real)
-            fake_d_output, _ = model.discriminator(fake_imgs_flat.detach())
-            target_fake = torch.zeros_like(fake_d_output)
-            loss_d_fake = loss_mse(fake_d_output, target_fake)
-            loss_d = 0.5 * (loss_d_real + loss_d_fake)
-            loss_d.backward()
-            opt_d.step()
+            
+            # AJUSTEMENT: Utilisation de autocast pour le forward pass du discriminateur.
+            with autocast(enabled=(config.DEVICE == "cuda")):
+                real_d_output, _ = model.discriminator(real_imgs_flat.detach())
+                loss_d_real = loss_mse(real_d_output, target_real)
+                
+                fake_d_output, _ = model.discriminator(fake_imgs_flat.detach())
+                target_fake = torch.zeros_like(fake_d_output)
+                loss_d_fake = loss_mse(fake_d_output, target_fake)
+                
+                loss_d = 0.5 * (loss_d_real + loss_d_fake)
+                
+            # AJUSTEMENT: Mise à l'échelle de la perte et rétropropagation avec le scaler.
+            scaler_d.scale(loss_d).backward()
+            scaler_d.step(opt_d)
+            scaler_d.update()
             
             pbar.set_postfix({
                 "L_Pred": f"{loss_latent.item():.3f}", "L_Rec": f"{loss_rec_l1.item():.3f}",
@@ -355,7 +415,10 @@ def train_mtld():
             
             with torch.no_grad():
                 model.eval()
-                comparison = torch.cat([real_seq_imgs[0].unsqueeze(0), fake_seq_imgs[0].unsqueeze(0)], dim=0)
+                # La génération d'images peut se faire en pleine précision pour la qualité
+                with autocast(enabled=(config.DEVICE == "cuda")):
+                    fake_seq_imgs_eval = model.decoder(z_pred_full_seq)
+                comparison = torch.cat([real_seq_imgs[0].unsqueeze(0), fake_seq_imgs_eval[0].unsqueeze(0)], dim=0)
                 comparison_flat = comparison.permute(1, 0, 2, 3, 4).reshape(-1, c, h, w)
                 grid_path = os.path.join(config.OUTPUT_SAVE_PATH, f"comparison_epoch_{epoch+1}.png")
                 utils.save_image(comparison_flat, grid_path, nrow=s, normalize=True)
@@ -376,35 +439,40 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
     output_dir_frames = os.path.join(config.OUTPUT_SAVE_PATH, "generated_frames_conditional")
     os.makedirs(output_dir_frames, exist_ok=True)
     
-    model = MTLD(config).to(config.DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=config.DEVICE))
+    # Utiliser une nouvelle instance de Config pour la génération
+    gen_config = Config()
+    
+    model = MTLD(gen_config).to(gen_config.DEVICE)
+    model.load_state_dict(torch.load(model_path, map_location=gen_config.DEVICE))
     model.eval()
     print("Modèle chargé avec succès.")
 
     transform = transforms.Compose([
-        transforms.Resize((config.IMG_SIZE, config.IMG_SIZE)),
+        transforms.Resize((gen_config.IMG_SIZE, gen_config.IMG_SIZE)),
         transforms.ToTensor(),
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
     
     priming_img_pil = Image.open(priming_image_path).convert("RGB")
-    priming_tensor = transform(priming_img_pil).unsqueeze(0).to(config.DEVICE)
+    priming_tensor = transform(priming_img_pil).unsqueeze(0).to(gen_config.DEVICE)
 
     print(f"Génération de {num_frames_to_generate} images à partir de l'image d'amorce.")
 
     with torch.no_grad():
-        z_start = model.encoder(priming_tensor)
-        z_future = model.trajectory_generator(z_start, max_len=num_frames_to_generate - 1)
-        z_full_seq = torch.cat([z_start.unsqueeze(1), z_future], dim=1)
-        generated_imgs_seq = model.decoder(z_full_seq).squeeze(0)
+        # L'inférence peut aussi bénéficier de l'autocast pour la vitesse
+        with autocast(enabled=(gen_config.DEVICE == "cuda")):
+            z_start = model.encoder(priming_tensor)
+            z_future = model.trajectory_generator(z_start, max_len=num_frames_to_generate - 1)
+            z_full_seq = torch.cat([z_start.unsqueeze(1), z_future], dim=1)
+            generated_imgs_seq = model.decoder(z_full_seq).squeeze(0)
 
-    video_path = os.path.join(config.OUTPUT_SAVE_PATH, f"generated_sequence_conditional.mp4")
+    video_path = os.path.join(gen_config.OUTPUT_SAVE_PATH, f"generated_sequence_conditional.mp4")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video_writer = cv2.VideoWriter(video_path, fourcc, 24, (config.IMG_SIZE, config.IMG_SIZE))
+    video_writer = cv2.VideoWriter(video_path, fourcc, 24, (gen_config.IMG_SIZE, gen_config.IMG_SIZE))
     pil_images_for_gif = []
 
     for i, img_tensor in enumerate(tqdm(generated_imgs_seq, desc="Sauvegarde des images")):
-        img_np = np.clip((img_tensor.permute(1, 2, 0) * 0.5 + 0.5).cpu().numpy() * 255, 0, 255).astype(np.uint8)
+        img_np = np.clip((img_tensor.permute(1, 2, 0).float() * 0.5 + 0.5).cpu().numpy() * 255, 0, 255).astype(np.uint8)
         img_pil = Image.fromarray(img_np, 'RGB')
         img_pil.save(os.path.join(output_dir_frames, f"frame_{i:04d}.png"))
         video_writer.write(cv2.cvtColor(img_np, cv2.COLOR_RGB_BGR))
@@ -412,7 +480,7 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
 
     video_writer.release()
     print(f"Vidéo MP4 sauvegardée : {video_path}")
-    gif_path = os.path.join(config.OUTPUT_SAVE_PATH, f"generated_sequence_conditional.gif")
+    gif_path = os.path.join(gen_config.OUTPUT_SAVE_PATH, f"generated_sequence_conditional.gif")
     pil_images_for_gif[0].save(
         gif_path, save_all=True, append_images=pil_images_for_gif[1:],
         duration=int(1000 / 24), loop=0
@@ -421,14 +489,18 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
 
 
 if __name__ == '__main__':
+    # Initialise la configuration globale utilisée par les modèles
+    config = Config()
+
     # Placez votre base de données (avec les sous-dossiers d'arcs) dans le
     # dossier spécifié par Config.DATASET_PATH.
     
     # --- MODE 1: ENTRAÎNEMENT DU MODÈLE ---
-    print("\n--- MODE ENTRAÎNEMENT (v1.5 Multi-Séquences) ---")
+    print("\n--- MODE ENTRAÎNEMENT (v1.5 Multi-Séquences, AJUSTÉ POUR 10Go VRAM) ---")
     train_mtld()
 
     # --- MODE 2: GÉNÉRATION CONDITIONNELLE ---
+    # Décommentez cette section pour lancer la génération après l'entraînement.
     # print("\n--- MODE GÉNÉRATION (v1.5 Multi-Séquences) ---")
     # config_gen = Config()
     # model_file = "./models_mtld_v1.5/mtld_v1.5_epoch_200.pth" 
@@ -440,8 +512,8 @@ if __name__ == '__main__':
     #     dummy_dataset = AnimeFrameDataset(config_gen.DATASET_PATH, 1)
     #     priming_image = dummy_dataset.sequences[0][50] 
     #     print(f"Utilisation de l'image d'amorce : {priming_image}")
-    # except (IndexError, FileNotFoundError):
-    #     print("ATTENTION: Impossible de trouver une image d'amorce par défaut. Spécifiez un chemin valide.")
+    # except (IndexError, FileNotFoundError) as e:
+    #     print(f"ATTENTION: Impossible de trouver une image d'amorce par défaut : {e}. Spécifiez un chemin valide.")
     #     priming_image = "/path/to/your/image.png" # REMPLACEZ CECI
 
     # if os.path.exists(priming_image):
