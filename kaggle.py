@@ -111,7 +111,7 @@ class GPUMonitor:
             pynvml.nvmlShutdown()
 
 class Config:
-    DATASET_PATH = "animes_dataset"
+    DATASET_PATH = "/kaggle/input/anima-s-dataset/animes_dataset"
     # NOUVEAU: Option pour pré-charger le dataset en RAM pour accélérer l'entraînement.
     # Mettre à False si le dataset est trop volumineux pour la RAM disponible.
     PRELOAD_DATASET_IN_RAM = True
