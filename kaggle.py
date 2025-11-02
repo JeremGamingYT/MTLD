@@ -3,22 +3,7 @@
 MTLD: Modèle à Trajectoire Latente Déterministe pour la Restitution Séquentielle d'Anime
 
 Version: 1.8 (Pré-chargement du Dataset en RAM)
-Auteur: Votre Expert en IA
 Date: 01 novembre 2025
-Description:
-Cette version introduit une optimisation majeure pour les pipelines de données
-limités par les I/O disque. Un nouveau paramètre de configuration,
-`PRELOAD_DATASET_IN_RAM`, permet de charger et de prétraiter l'intégralité
-du dataset en mémoire vive au démarrage du script.
-
-1.  **Performance Accrue :** En éliminant les accès disque pendant l'entraînement,
-    cette approche maximise l'utilisation du GPU et accélère significativement
-    la vitesse des époques, surtout avec des disques lents ou des datasets
-    composés de nombreux petits fichiers.
-2.  **Flexibilité :** L'option est configurable, permettant de la désactiver
-    pour les datasets trop volumineux qui ne tiendraient pas en RAM.
-3.  **Transparence :** Le script calcule et affiche une estimation de la mémoire
-    requise et utilise une barre de progression pour suivre le chargement initial.
 """
 
 # --- 1. Importations et Configuration ---
