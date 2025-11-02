@@ -603,7 +603,7 @@ if __name__ == '__main__':
     # if os.path.exists(priming_image):
     #     generate_sequence(
     #         model_path=model_file, 
-    *         priming_image_path=priming_image, 
+    #         priming_image_path="/kaggle/input/anima-s-dataset/animes_dataset/Arc_1/00000.png", 
     #         num_frames_to_generate=100,
     #         config=config_gen
     #     )
