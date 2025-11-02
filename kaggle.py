@@ -2,21 +2,23 @@
 """
 MTLD: Modèle à Trajectoire Latente Déterministe pour la Restitution Séquentielle d'Anime
 
-Version: 1.7 (Modernisation de l'API PyTorch)
+Version: 1.8 (Pré-chargement du Dataset en RAM)
 Auteur: Votre Expert en IA
 Date: 01 novembre 2025
 Description:
-Cette version corrige tous les avertissements de dépréciation (`FutureWarning`)
-émis par les versions récentes de PyTorch. Elle modernise l'API pour la
-précision mixte automatique (AMP) en utilisant `torch.amp` au lieu de
-l'ancien `torch.cuda.amp`.
+Cette version introduit une optimisation majeure pour les pipelines de données
+limités par les I/O disque. Un nouveau paramètre de configuration,
+`PRELOAD_DATASET_IN_RAM`, permet de charger et de prétraiter l'intégralité
+du dataset en mémoire vive au démarrage du script.
 
-1.  Les appels à `GradScaler()` et `autocast()` sont mis à jour vers la
-    nouvelle syntaxe, plus explicite et robuste, ce qui garantit la
-    compatibilité future et la clarté du code.
-2.  Des instructions claires sont ajoutées concernant la bibliothèque de
-    surveillance GPU, recommandant `nvidia-ml-py` pour résoudre les
-    avertissements liés à la dépréciation de `pynvml`.
+1.  **Performance Accrue :** En éliminant les accès disque pendant l'entraînement,
+    cette approche maximise l'utilisation du GPU et accélère significativement
+    la vitesse des époques, surtout avec des disques lents ou des datasets
+    composés de nombreux petits fichiers.
+2.  **Flexibilité :** L'option est configurable, permettant de la désactiver
+    pour les datasets trop volumineux qui ne tiendraient pas en RAM.
+3.  **Transparence :** Le script calcule et affiche une estimation de la mémoire
+    requise et utilise une barre de progression pour suivre le chargement initial.
 """
 
 # --- 1. Importations et Configuration ---
@@ -39,10 +41,6 @@ import math
 import shutil
 import warnings
 
-# MODIFIÉ: L'importation dépréciée de torch.cuda.amp est supprimée.
-# Les fonctions seront appelées via torch.amp directement.
-# from torch.cuda.amp import GradScaler, autocast
-
 warnings.filterwarnings("ignore", category=UserWarning)
 
 try:
@@ -50,7 +48,6 @@ try:
 except ImportError:
     print("="*80); print("ERREUR: Bibliothèque LPIPS non trouvée."); print("!pip install lpips"); print("="*80); exit()
 
-# MODIFIÉ: Ajout de commentaires pour guider l'utilisateur sur la mise à jour de pynvml.
 # AVERTISSEMENT: La bibliothèque 'pynvml' est dépréciée.
 # Pour supprimer l'avertissement de PyTorch, il est recommandé de la remplacer par 'nvidia-ml-py':
 # pip uninstall pynvml
@@ -61,12 +58,7 @@ except ImportError:
     print("="*80); print("AVERTISSEMENT: pynvml non trouvé. La surveillance GPU est désactivée."); print("!pip install nvidia-ml-py"); print("="*80)
     pynvml = None
 
-# NOUVEAU: Classe de surveillance du GPU
 class GPUMonitor:
-    """
-    Surveille la température et la consommation d'énergie d'un GPU NVIDIA.
-    Peut déclencher une pause ou un arrêt de l'entraînement si les seuils sont dépassés.
-    """
     def __init__(self, config, device_id=0):
         if not pynvml:
             self.enabled = False
@@ -86,36 +78,26 @@ class GPUMonitor:
     def check(self):
         if not self.enabled:
             return "continue"
-
-        # 1. Vérification de la température
         temp = pynvml.nvmlDeviceGetTemperature(self.handle, pynvml.NVML_TEMPERATURE_GPU)
         if temp > self.config.GPU_TEMP_THRESHOLD_C:
             print(f"\n! ALERTE GPU ! Température atteinte : {temp}°C (Seuil: {self.config.GPU_TEMP_THRESHOLD_C}°C)")
             return self._handle_alert()
-
-        # 2. Vérification de la consommation d'énergie
         try:
-            power_usage = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0  # en Watts
-            power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(self.handle) / 1000.0 # en Watts
+            power_usage = pynvml.nvmlDeviceGetPowerUsage(self.handle) / 1000.0
+            power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(self.handle) / 1000.0
             power_percent = (power_usage / power_limit) * 100
             if power_percent > self.config.GPU_POWER_THRESHOLD_PERCENT:
                 print(f"\n! ALERTE GPU ! Consommation atteinte : {power_percent:.1f}% (Seuil: {self.config.GPU_POWER_THRESHOLD_PERCENT}%)")
                 return self._handle_alert()
         except pynvml.NVMLError:
-            # Certains GPU ne rapportent pas la consommation de manière fiable.
             pass
-
         return "continue"
 
     def _handle_alert(self):
         current_time = time.time()
         self.recent_alerts.append(current_time)
-
-        # Nettoyer les anciennes alertes
         while self.recent_alerts and current_time - self.recent_alerts[0] > self.config.GPU_SHUTDOWN_WINDOW_S:
             self.recent_alerts.popleft()
-
-        # Vérifier si le nombre d'alertes récentes dépasse le seuil d'arrêt
         if len(self.recent_alerts) >= self.config.GPU_SHUTDOWN_THRESHOLD_COUNT:
             print(f"\n!! ALERTE CRITIQUE !! {len(self.recent_alerts)} alertes GPU en {self.config.GPU_SHUTDOWN_WINDOW_S}s. Arrêt d'urgence.")
             return "shutdown"
@@ -129,7 +111,11 @@ class GPUMonitor:
             pynvml.nvmlShutdown()
 
 class Config:
-    DATASET_PATH = "/kaggle/input/anima-s-dataset/animes_dataset"
+    DATASET_PATH = "animes_dataset"
+    # NOUVEAU: Option pour pré-charger le dataset en RAM pour accélérer l'entraînement.
+    # Mettre à False si le dataset est trop volumineux pour la RAM disponible.
+    PRELOAD_DATASET_IN_RAM = True
+    
     IMG_SIZE = 256
     IMG_CHANNELS = 3
     TRAINING_SEQUENCE_LENGTH = 16
@@ -147,14 +133,14 @@ class Config:
     LAMBDA_ADV = 1.0
     LAMBDA_FM = 10.0
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    NUM_WORKERS = 2
+    NUM_WORKERS = 4
     
-    MODEL_SAVE_PATH = "./models_mtld_v1.7/"
-    OUTPUT_SAVE_PATH = "./outputs_mtld_v1.7/"
+    MODEL_SAVE_PATH = "./models_mtld_v1.8/"
+    OUTPUT_SAVE_PATH = "./outputs_mtld_v1.8/"
     SAVE_EPOCH_INTERVAL = 10
     
     RESUME_TRAINING = False
-    CHECKPOINT_TO_RESUME = "./models_mtld_v1.7/mtld_v1.6_checkpoint_epoch_20.pth" 
+    CHECKPOINT_TO_RESUME = "./models_mtld_v1.7/mtld_v1.7_checkpoint_epoch_10.pth" 
 
     GPU_MONITORING_ENABLED = True
     GPU_TEMP_THRESHOLD_C = 85
@@ -163,15 +149,21 @@ class Config:
     GPU_SHUTDOWN_THRESHOLD_COUNT = 5
     GPU_SHUTDOWN_WINDOW_S = 300
 
-# --- 2. Préparation des Données (inchangée) ---
+# --- 2. Préparation des Données (MODIFIÉE pour le pré-chargement en RAM) ---
 
 class AnimeFrameDataset(Dataset):
-    def __init__(self, root_dir, sequence_length, transform=None):
+    """
+    Dataset gérant les séquences et capable de pré-charger toutes les images
+    en RAM pour des performances maximales.
+    """
+    def __init__(self, root_dir, sequence_length, transform=None, config=None):
         self.root_dir = root_dir
         self.sequence_length = sequence_length
         self.transform = transform
+        self.config = config
         self.sequences = []
         self.cumulative_lengths = []
+        self.preloaded_data = None
 
         if not os.path.isdir(root_dir):
             raise FileNotFoundError(f"Le répertoire racine du dataset n'a pas été trouvé : {root_dir}")
@@ -202,6 +194,39 @@ class AnimeFrameDataset(Dataset):
             raise ValueError("Aucun arc valide (suffisamment long) n'a été trouvé dans le dataset.")
         print(f"\nDataset initialisé : {len(self.sequences)} arcs valides, {self.total_sequences()} séquences d'entraînement au total.")
 
+        # NOUVEAU: Logique de pré-chargement
+        if self.config and self.config.PRELOAD_DATASET_IN_RAM:
+            self._preload_images()
+
+    def _preload_images(self):
+        """Charge et transforme toutes les images uniques du dataset en RAM."""
+        print("\n--- Pré-chargement du dataset en RAM ---")
+        # Créer une liste de tous les chemins d'images uniques pour éviter de charger des doublons
+        all_paths = sorted(list(set(path for arc in self.sequences for path in arc)))
+        num_images = len(all_paths)
+        if num_images == 0:
+            print("Aucune image à pré-charger.")
+            return
+
+        # Calculer l'estimation de la RAM
+        c, h, w = self.config.IMG_CHANNELS, self.config.IMG_SIZE, self.config.IMG_SIZE
+        bytes_per_tensor = c * h * w * 4  # torch.float32 utilise 4 octets
+        total_bytes = num_images * bytes_per_tensor
+        total_mb = total_bytes / (1024**2)
+        print(f"Chargement de {num_images} images uniques... Estimation RAM : {total_mb:.2f} Mo.")
+
+        self.preloaded_data = {}
+        for path in tqdm(all_paths, desc="Pré-chargement des images"):
+            try:
+                img = Image.open(path).convert("RGB")
+                if self.transform:
+                    self.preloaded_data[path] = self.transform(img)
+            except Exception as e:
+                print(f"AVERTISSEMENT: Impossible de charger l'image {path}. Erreur: {e}")
+        
+        print("--- Pré-chargement terminé ---")
+
+
     def __len__(self):
         return self.cumulative_lengths[-1] if self.cumulative_lengths else 0
         
@@ -217,10 +242,20 @@ class AnimeFrameDataset(Dataset):
         else:
             local_start_idx = idx - self.cumulative_lengths[arc_index - 1]
         sequence_paths = self.sequences[arc_index][local_start_idx : local_start_idx + self.sequence_length]
-        images = [Image.open(p).convert("RGB") for p in sequence_paths]
-        if self.transform:
-            images = torch.stack([self.transform(img) for img in images])
-        return images
+        
+        # MODIFIÉ: Utilise les données pré-chargées si disponibles
+        if self.preloaded_data:
+            images = [self.preloaded_data[p] for p in sequence_paths if p in self.preloaded_data]
+            if len(images) != self.sequence_length:
+                 raise RuntimeError(f"Une ou plusieurs images de la séquence index {idx} n'ont pas pu être chargées depuis la RAM.")
+        else:
+            images_pil = [Image.open(p).convert("RGB") for p in sequence_paths]
+            if self.transform:
+                images = [self.transform(img) for img in images_pil]
+            else:
+                images = images_pil
+        
+        return torch.stack(images)
 
 def get_dataloader(config):
     transform = transforms.Compose([
@@ -228,10 +263,12 @@ def get_dataloader(config):
         transforms.ToTensor(),
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
     ])
+    # MODIFIÉ: Passe l'objet config au Dataset
     dataset = AnimeFrameDataset(
         root_dir=config.DATASET_PATH, 
         sequence_length=config.TRAINING_SEQUENCE_LENGTH,
-        transform=transform
+        transform=transform,
+        config=config
     )
     dataloader = DataLoader(
         dataset, batch_size=config.BATCH_SIZE, shuffle=True, 
@@ -337,7 +374,7 @@ class MTLD(nn.Module):
         self.trajectory_generator = ConditionalLatentTrajectoryGenerator(config.GRU_HIDDEN_DIM, config.LATENT_DIM)
         self.discriminator = PatchDiscriminator(config.IMG_CHANNELS)
 
-# --- 4. Boucle d'Entraînement (MODIFIÉE pour la nouvelle API AMP) ---
+# --- 4. Boucle d'Entraînement (inchangée) ---
 
 def save_checkpoint(epoch, model, opt_g, opt_d, scaler_g, scaler_d, config):
     state = {
@@ -348,7 +385,7 @@ def save_checkpoint(epoch, model, opt_g, opt_d, scaler_g, scaler_d, config):
         'scaler_g_state_dict': scaler_g.state_dict(),
         'scaler_d_state_dict': scaler_d.state_dict(),
     }
-    filename = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v1.7_checkpoint_epoch_{epoch}.pth")
+    filename = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v1.8_checkpoint_epoch_{epoch}.pth")
     torch.save(state, filename)
     print(f"\nCheckpoint sauvegardé : {filename}")
 
@@ -371,8 +408,6 @@ def train_mtld():
     loss_mse = nn.MSELoss()
     loss_lpips_vgg = lpips.LPIPS(net='vgg').to(config.DEVICE)
     
-    # MODIFIÉ: Utilisation de la nouvelle API torch.amp.GradScaler
-    # Le flag 'enabled' garantit que le scaler est inactif en mode CPU.
     scaler_g = torch.amp.GradScaler(enabled=(config.DEVICE == "cuda"))
     scaler_d = torch.amp.GradScaler(enabled=(config.DEVICE == "cuda"))
     
@@ -402,7 +437,7 @@ def train_mtld():
 
     gpu_monitor = GPUMonitor(config)
 
-    print("Début de l'entraînement du modèle conditionnel...")
+    print("\nDébut de l'entraînement du modèle conditionnel...")
     try:
         for epoch in range(start_epoch, config.EPOCHS):
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.EPOCHS}")
@@ -413,59 +448,41 @@ def train_mtld():
                 priming_img = real_seq_imgs[:, 0, :, :, :]
                 future_imgs = real_seq_imgs[:, 1:, :, :, :]
                 
-                # --- Entraînement du Générateur ---
                 opt_g.zero_grad(set_to_none=True)
                 
-                # MODIFIÉ: Utilisation de la nouvelle API torch.amp.autocast
                 with torch.amp.autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == "cuda")):
                     with torch.no_grad():
                         z_start_true = model.encoder(priming_img)
                         z_future_true = model.encoder(future_imgs.reshape(-1, c, h, w)).view(b, s - 1, -1)
-
                     z_future_pred = model.trajectory_generator(z_start_true, max_len=s - 1)
-                    
                     z_pred_full_seq = torch.cat([z_start_true.unsqueeze(1), z_future_pred], dim=1)
                     fake_seq_imgs = model.decoder(z_pred_full_seq)
-
                     fake_imgs_flat = fake_seq_imgs.view(b * s, c, h, w)
                     real_imgs_flat = real_seq_imgs.view(b * s, c, h, w)
-                    
                     loss_latent = loss_mse(z_future_pred, z_future_true)
                     loss_rec_l1 = loss_l1(fake_seq_imgs, real_seq_imgs)
                     loss_rec_lpips = loss_lpips_vgg(fake_imgs_flat, real_imgs_flat).mean()
-
                     fake_d_output, _ = model.discriminator(fake_imgs_flat)
                     target_real = torch.ones_like(fake_d_output)
                     loss_adv = loss_mse(fake_d_output, target_real)
-                    
                     _, real_features = model.discriminator(real_imgs_flat.detach(), extract_features=True)
                     _, fake_features = model.discriminator(fake_imgs_flat, extract_features=True)
                     loss_fm = sum(loss_l1(fake_f, real_f.detach()) for real_f, fake_f in zip(real_features, fake_features))
-                    
-                    loss_g = (config.LAMBDA_REC_L1 * loss_rec_l1 +
-                              config.LAMBDA_REC_LPIPS * loss_rec_lpips +
-                              config.LAMBDA_LATENT * loss_latent +
-                              config.LAMBDA_ADV * loss_adv +
-                              config.LAMBDA_FM * loss_fm)
-
+                    loss_g = (config.LAMBDA_REC_L1 * loss_rec_l1 + config.LAMBDA_REC_LPIPS * loss_rec_lpips +
+                              config.LAMBDA_LATENT * loss_latent + config.LAMBDA_ADV * loss_adv + config.LAMBDA_FM * loss_fm)
                 scaler_g.scale(loss_g).backward()
                 scaler_g.step(opt_g)
                 scaler_g.update()
                 
-                # --- Entraînement du Discriminateur ---
                 opt_d.zero_grad(set_to_none=True)
                 
-                # MODIFIÉ: Utilisation de la nouvelle API torch.amp.autocast
                 with torch.amp.autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == "cuda")):
                     real_d_output, _ = model.discriminator(real_imgs_flat.detach())
                     loss_d_real = loss_mse(real_d_output, target_real)
-                    
                     fake_d_output, _ = model.discriminator(fake_imgs_flat.detach())
                     target_fake = torch.zeros_like(fake_d_output)
                     loss_d_fake = loss_mse(fake_d_output, target_fake)
-                    
                     loss_d = 0.5 * (loss_d_real + loss_d_fake)
-                    
                 scaler_d.scale(loss_d).backward()
                 scaler_d.step(opt_d)
                 scaler_d.update()
@@ -478,17 +495,15 @@ def train_mtld():
                 if i > 0 and i % 20 == 0:
                     status = gpu_monitor.check()
                     if status == "shutdown":
-                        print("Arrêt d'urgence demandé par le moniteur GPU. Sauvegarde du checkpoint...")
+                        print("Arrêt d'urgence demandé. Sauvegarde du checkpoint...")
                         save_checkpoint(epoch + 1, model, opt_g, opt_d, scaler_g, scaler_d, config)
                         gpu_monitor.shutdown()
                         exit()
 
             if (epoch + 1) % config.SAVE_EPOCH_INTERVAL == 0:
                 save_checkpoint(epoch + 1, model, opt_g, opt_d, scaler_g, scaler_d, config)
-                
                 with torch.no_grad():
                     model.eval()
-                    # MODIFIÉ: Utilisation de la nouvelle API torch.amp.autocast
                     with torch.amp.autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == "cuda")):
                         fake_seq_imgs_eval = model.decoder(z_pred_full_seq)
                     comparison = torch.cat([real_seq_imgs[0].unsqueeze(0), fake_seq_imgs_eval[0].unsqueeze(0)], dim=0)
@@ -497,13 +512,11 @@ def train_mtld():
                     utils.save_image(comparison_flat, grid_path, nrow=s, normalize=True)
                     print(f"Image de comparaison sauvegardée : {grid_path}")
                     model.train()
-    
     finally:
         gpu_monitor.shutdown()
-
     print("Entraînement terminé.")
 
-# --- 5. Génération de Séquence (MODIFIÉE pour la nouvelle API AMP) ---
+# --- 5. Génération de Séquence (inchangée) ---
 
 def generate_sequence(model_path, priming_image_path, num_frames_to_generate, config):
     print("--- Démarrage de la Génération de Séquence Conditionnelle ---")
@@ -516,7 +529,6 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
     os.makedirs(output_dir_frames, exist_ok=True)
     
     gen_config = Config()
-    
     model = MTLD(gen_config).to(gen_config.DEVICE)
     
     print(f"Chargement du modèle depuis : {model_path}")
@@ -527,7 +539,6 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
     else:
         model.load_state_dict(checkpoint)
         print("Poids du modèle chargés depuis un fichier de poids simple.")
-        
     model.eval()
 
     transform = transforms.Compose([
@@ -542,7 +553,6 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
     print(f"Génération de {num_frames_to_generate} images à partir de l'image d'amorce.")
 
     with torch.no_grad():
-        # MODIFIÉ: Utilisation de la nouvelle API torch.amp.autocast
         with torch.amp.autocast(device_type=gen_config.DEVICE, dtype=torch.float16, enabled=(gen_config.DEVICE == "cuda")):
             z_start = model.encoder(priming_tensor)
             z_future = model.trajectory_generator(z_start, max_len=num_frames_to_generate - 1)
@@ -574,25 +584,26 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
 if __name__ == '__main__':
     config = Config()
     
-    print(f"\n--- MODE ENTRAÎNEMENT (v1.7 API PyTorch Modernisée) ---")
+    print(f"\n--- MODE ENTRAÎNEMENT (v1.8 Pré-chargement RAM) ---")
     train_mtld()
 
     # --- MODE 2: GÉNÉRATION CONDITIONNELLE ---
-    # print("\n--- MODE GÉNÉRATION (v1.7) ---")
+    # print("\n--- MODE GÉNÉRATION (v1.8) ---")
     # config_gen = Config()
-    # model_file = "./models_mtld_v1.7/mtld_v1.7_checkpoint_epoch_100.pth" 
+    # model_file = "./models_mtld_v1.8/mtld_v1.8_checkpoint_epoch_100.pth" 
     # try:
-    #     dummy_dataset = AnimeFrameDataset(config_gen.DATASET_PATH, 1)
+    #     # On doit instancier un Dataset pour trouver un chemin d'image valide
+    #     dummy_dataset = AnimeFrameDataset(config_gen.DATASET_PATH, 1, config=config_gen)
     #     priming_image = dummy_dataset.sequences[0][50] 
     #     print(f"Utilisation de l'image d'amorce : {priming_image}")
-    # except (IndexError, FileNotFoundError) as e:
+    # except (IndexError, FileNotFoundError, ValueError) as e:
     #     print(f"ATTENTION: Impossible de trouver une image d'amorce par défaut : {e}. Spécifiez un chemin valide.")
     #     priming_image = "/path/to/your/image.png" # REMPLACEZ CECI
 
     # if os.path.exists(priming_image):
     #     generate_sequence(
     #         model_path=model_file, 
-    #         priming_image_path=priming_image, 
+    *         priming_image_path=priming_image, 
     #         num_frames_to_generate=100,
     #         config=config_gen
     #     )

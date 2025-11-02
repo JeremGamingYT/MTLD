@@ -11,3 +11,4 @@ videos_raw/
 .venv/
 .venv
 *.pth
+kaggle/
