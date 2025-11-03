@@ -49,7 +49,7 @@ try:
 except ImportError: print("="*80), print("ERREUR: LPIPS non trouvé. !pip install lpips"), print("="*80), exit()
 try:
     import pynvml
-except ImportError: print("="*80), print("AVERTISSEMENT: pynvml non trouvé."), print("="*80), pynvml = None
+except ImportError: print("="*80), print("AVERTISSEMENT: pynvml non trouvé."), print("="*80), pynvml == None
 
 class GPUMonitor: # Conservé tel quel
     def __init__(self, config, device_id=0):
