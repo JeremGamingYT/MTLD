@@ -1,23 +1,5 @@
 # -*- coding: utf-8 -*-
 # ==============================================================================
-#                      INSTALLATION DES DÉPENDANCES
-# ==============================================================================
-# Ce bloc garantit que toutes les dépendances sont installées dans l'environnement du notebook.
-try:
-    import diffusers
-    import transformers
-    import accelerate
-    import ftfy
-    import bitsandbytes
-    import imageio
-    print("Dépendances déjà satisfaites.")
-except ImportError:
-    print("Installation des dépendances requises...")
-    !pip install diffusers transformers accelerate ftfy bitsandbytes opencv-python imageio imageio-ffmpeg -q
-    print("Dépendances installées avec succès.")
-
-
-# ==============================================================================
 #                            IMPORTATIONS GLOBALES
 # ==============================================================================
 import os
