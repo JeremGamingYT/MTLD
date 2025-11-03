@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 # ==============================================================================
 #                            IMPORTATIONS GLOBALES
 # ==============================================================================
@@ -30,7 +31,7 @@ class Config:
     """Configuration centralisée pour le modèle, l'entraînement et les données."""
     # --- Chemins et Données ---
     # !! MODIFIEZ CETTE LIGNE pour pointer vers votre dataset !!
-    DATASET_PATH = "/kaggle/input/anima-s-dataset/animes_dataset" 
+    DATASET_PATH = "./animes_dataset_dummy/" 
     OUTPUT_PATH = "./clemo_diff_outputs/"
     MODEL_NAME = "CLeMo-Diff_v1.0"
     
@@ -193,11 +194,6 @@ class MotionPriorVAE(nn.Module):
     def decode(self, z):
         return self.decoder(z).view(-1, self.sequence_length, self.motion_dim)
 
-    def forward(self, z_motion):
-        mu, logvar = self.encode(z_motion)
-        z = self.reparameterize(mu, logvar)
-        return self.decode(z), mu, logvar
-
     def sample(self, num_samples, device):
         z = torch.randn(num_samples, self.fc_mu.out_features).to(device)
         return self.decode(z)
@@ -301,7 +297,6 @@ def generate_animation(model, input_image_path, num_frames, num_inference_steps=
     z_motion_proj = model.motion_proj(z_motion)
     if num_frames != config.SEQUENCE_LENGTH:
         z_motion_proj = F.interpolate(z_motion_proj.transpose(1, 2), size=num_frames, mode='linear').transpose(1, 2)
-    conditioning = torch.cat([z_app.repeat(1, num_frames, 1), z_motion_proj], dim=-1) # Correction: conditionnement par frame
     
     model.noise_scheduler.set_timesteps(num_inference_steps)
     h, w = config.IMG_SIZE // 8, config.IMG_SIZE // 8
@@ -310,7 +305,6 @@ def generate_animation(model, input_image_path, num_frames, num_inference_steps=
     for t in tqdm(model.noise_scheduler.timesteps, desc="Dénaturation"):
         noise_pred_list = []
         for i in range(num_frames):
-            # Créer un conditionnement spécifique pour la frame `i`
             frame_conditioning = torch.cat([z_app, z_motion_proj[:, i:i+1, :]], dim=1)
             noise_pred_i = model.unet(latents[:, i], t, frame_conditioning).sample
             noise_pred_list.append(noise_pred_i)
@@ -348,7 +342,6 @@ if __name__ == '__main__':
 
     # --- 3. Entraînement du modèle ---
     # NOTE: L'entraînement est coûteux. Sur un vrai dataset, cela prendra des heures/jours.
-    # Le modèle retourné est l'état final après N époques.
     trained_model = train_clemo_diff(config)
 
     # --- 4. Génération d'une animation ---
