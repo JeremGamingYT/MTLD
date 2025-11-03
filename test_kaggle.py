@@ -3,40 +3,25 @@
 VAE-Flow: Modèle Variationnel à Dynamique Latente par Flots Normalisants
 pour la Génération Séquentielle d'Anime
 
-Version: 2.0
+Version: 2.1 (Correction de la Distribution de Base)
 Auteur: Votre Expert en IA
 Date: 03 novembre 2025
 Description:
-Cette version représente une refonte architecturale majeure du modèle MTLD v1.8.
-Elle abandonne l'approche GAN, souvent instable et lente à converger, au profit
-d'un cadre entièrement probabiliste basé sur les Auto-Encodeurs Variationnels (VAE)
-et les Flots Normalisants.
+Cette version corrige une instabilité numérique liée à la distribution de base
+`torch.distributions.MultivariateNormal`.
 
-INNOVATIONS CLÉS :
-1.  **Abandon du GAN :** Le discriminateur et la perte adversariale sont
-    complètement supprimés. L'entraînement est stable, basé sur l'optimisation
-    d'une seule fonction de coût : la borne inférieure de l'évidence (ELBO).
+CORRECTION CLÉ :
+- Remplacement de `MultivariateNormal` par une distribution `torch.distributions.Normal`
+  factorisée. C'est mathématiquement équivalent pour une distribution de base
+  gaussienne avec une covariance identité, mais numériquement plus stable et
+  robuste dans PyTorch.
+- Les calculs de log-probabilité dans la boucle d'entraînement sont adaptés en
+  ajoutant `.sum(dim=-1)` pour agréger les probabilités des dimensions latentes
+  indépendantes.
+- La méthode d'échantillonnage dans la fonction de génération est mise à jour.
 
-2.  **Prior Complexe avec Flot Normalisant :** L'a priori gaussien simple des VAEs
-    classiques, souvent cause d'images floues, est remplacé par une distribution
-    riche et flexible apprise par un Flot Normalisant (`NormalizingFlow`).
-    Cela permet à l'espace latent de capturer des détails fins, menant à des
-    reconstructions de haute fidélité.
-
-3.  **Dynamique Latente Déterministe avec Flot Conditionnel :** La prédiction de
-    trajectoire par GRU est remplacée par un `LatentTrajectoryFlow`, un flot
-    normalisant conditionnel qui apprend une transformation bijective et
-    déterministe `z_{t+1} = f(z_t, bruit)`. Cette approche modélise la
-    distribution de transition `p(z_{t+1}|z_t)`, offrant une dynamique temporelle
-    plus robuste et cohérente.
-
-4.  **Stabilité et Efficacité :** En éliminant l'entraînement adversarial, le
-    modèle converge de manière plus stable et prédictible. La complexité de
-    calcul est déplacée vers le calcul du Jacobien des flots, qui est
-    analytiquement efficace dans cette architecture.
-
-L'infrastructure de gestion des données (avec pré-chargement en RAM), de monitoring GPU
-et de configuration est conservée de la v1.8.
+Cette modification résout l'erreur `ValueError` lors du calcul de la log-vraisemblance
+et améliore la stabilité générale de l'entraînement.
 """
 
 # --- 1. Importations et Configuration ---
@@ -110,36 +95,34 @@ class Config:
     DATASET_PATH = "/kaggle/input/anima-s-dataset/animes_dataset"
     PRELOAD_DATASET_IN_RAM = True
     
-    IMG_SIZE = 128 # Réduit pour un entraînement plus rapide avec le nouveau modèle
+    IMG_SIZE = 128
     IMG_CHANNELS = 3
     TRAINING_SEQUENCE_LENGTH = 12
     LATENT_DIM = 256
     
-    # NOUVEAUX hyperparamètres pour le VAE-Flow
-    NUM_FLOW_BLOCKS = 6          # Nombre de blocs de couplage dans chaque flot
-    COUPLING_HIDDEN_DIM = 512    # Dimension cachée des réseaux dans les flots
+    NUM_FLOW_BLOCKS = 6
+    COUPLING_HIDDEN_DIM = 512
 
     EPOCHS = 150
-    BATCH_SIZE = 4 # Peut être augmenté car il n'y a plus de discriminateur
+    BATCH_SIZE = 4
     LEARNING_RATE = 2e-4
     BETA1 = 0.9
     BETA2 = 0.999
     
-    # NOUVELLES pondérations de la perte VAE-Flow
     LAMBDA_REC_L1 = 100.0
     LAMBDA_REC_LPIPS = 10.0
-    LAMBDA_PRIOR = 1.0          # Poids pour la vraisemblance du prior p(z_0)
-    LAMBDA_DYNAMICS = 1.0       # Poids pour la vraisemblance de la dynamique p(z_{t+1}|z_t)
+    LAMBDA_PRIOR = 1.0
+    LAMBDA_DYNAMICS = 1.0
     
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     NUM_WORKERS = 4
     
-    MODEL_SAVE_PATH = "./models_vaeflow_v2.0/"
-    OUTPUT_SAVE_PATH = "./outputs_vaeflow_v2.0/"
+    MODEL_SAVE_PATH = "./models_vaeflow_v2.1/"
+    OUTPUT_SAVE_PATH = "./outputs_vaeflow_v2.1/"
     SAVE_EPOCH_INTERVAL = 10
     
     RESUME_TRAINING = False
-    CHECKPOINT_TO_RESUME = "" # Spécifier le chemin vers un checkpoint v2.0
+    CHECKPOINT_TO_RESUME = ""
 
     GPU_MONITORING_ENABLED = True
     GPU_TEMP_THRESHOLD_C = 85
@@ -205,79 +188,59 @@ def get_dataloader(config):
     dataloader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=True, drop_last=True)
     return dataloader, dataset.total_sequences()
 
-# --- 3. NOUVELLE Architecture du Modèle (VAE-Flow) ---
+# --- 3. Architecture du Modèle (VAE-Flow) ---
 
 class ResidualCouplingBlock(nn.Module):
-    """Bloc de base pour les Flots Normalisants (RealNVP-style)."""
     def __init__(self, dim, hidden_dim, condition_dim=None):
         super().__init__()
         self.dim = dim
         self.d_half = dim // 2
         self.d_other = dim - self.d_half
-        
         input_net_dim = self.d_half + (condition_dim if condition_dim is not None else 0)
-
         self.s_t_network = nn.Sequential(
-            nn.Linear(input_net_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, self.d_other * 2) # *2 pour scale (s) et translation (t)
+            nn.Linear(input_net_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, self.d_other * 2)
         )
-
     def forward(self, x, condition=None):
         x_a, x_b = x.chunk(2, dim=-1)
-        
         net_input = torch.cat([x_a, condition], dim=-1) if condition is not None else x_a
         s_t = self.s_t_network(net_input)
         s, t = s_t.chunk(2, dim=-1)
-        
-        s = torch.tanh(s) # Stabilise l'échelle
-        
+        s = torch.tanh(s)
         y_b = x_b * torch.exp(s) + t
         y = torch.cat([x_a, y_b], dim=-1)
-        
         log_det_J = s.sum(dim=-1)
         return y, log_det_J
-
     def inverse(self, y, condition=None):
         y_a, y_b = y.chunk(2, dim=-1)
-
         net_input = torch.cat([y_a, condition], dim=-1) if condition is not None else y_a
         s_t = self.s_t_network(net_input)
         s, t = s_t.chunk(2, dim=-1)
-        
         s = torch.tanh(s)
-        
         x_b = (y_b - t) * torch.exp(-s)
         x = torch.cat([y_a, x_b], dim=-1)
-        
         log_det_J = -s.sum(dim=-1)
         return x, log_det_J
 
 class NormalizingFlow(nn.Module):
-    """Séquence de blocs de couplage pour modéliser une distribution."""
     def __init__(self, dim, hidden_dim, n_blocks, condition_dim=None):
         super().__init__()
-        self.blocks = nn.ModuleList([
-            ResidualCouplingBlock(dim, hidden_dim, condition_dim) for _ in range(n_blocks)
-        ])
+        self.blocks = nn.ModuleList([ResidualCouplingBlock(dim, hidden_dim, condition_dim) for _ in range(n_blocks)])
         self.permutations = [torch.randperm(dim) for _ in range(n_blocks)]
-
-    def forward(self, x, condition=None): # de z -> u (base)
+    def forward(self, x, condition=None):
         log_det_J_total = 0
         for i, block in enumerate(self.blocks):
-            p = self.permutations[i]
+            p = self.permutations[i].to(x.device)
             x = x[:, p]
             x, log_det_J = block(x, condition)
             log_det_J_total += log_det_J
         return x, log_det_J_total
-
-    def inverse(self, u, condition=None): # de u (base) -> z
+    def inverse(self, u, condition=None):
         log_det_J_total = 0
         for i, block in reversed(list(enumerate(self.blocks))):
             u, log_det_J = block.inverse(u, condition)
-            p = self.permutations[i]
+            p = self.permutations[i].to(u.device)
             inv_p = torch.argsort(p)
             u = u[:, inv_p]
             log_det_J_total += log_det_J
@@ -296,12 +259,11 @@ class VariationalEncoder(nn.Module):
         feature_map_size = img_size // 16
         self.fc_mu = nn.Linear(512 * feature_map_size * feature_map_size, latent_dim)
         self.fc_logvar = nn.Linear(512 * feature_map_size * feature_map_size, latent_dim)
-
     def forward(self, x):
         h = self.model(x)
         return self.fc_mu(h), self.fc_logvar(h)
 
-class Decoder(nn.Module): # Conservé presque tel quel
+class Decoder(nn.Module):
     def __init__(self, latent_dim, out_channels, img_size):
         super().__init__()
         feature_map_size = img_size // 16
@@ -324,41 +286,37 @@ class Decoder(nn.Module): # Conservé presque tel quel
         return img
 
 class VAEFlow(nn.Module):
-    """Le modèle principal qui assemble l'encodeur, le décodeur et les flots."""
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.encoder = VariationalEncoder(config.IMG_CHANNELS, config.LATENT_DIM, config.IMG_SIZE)
         self.decoder = Decoder(config.LATENT_DIM, config.IMG_CHANNELS, config.IMG_SIZE)
-        
-        # Flot pour le prior p(z)
         self.prior_flow = NormalizingFlow(config.LATENT_DIM, config.COUPLING_HIDDEN_DIM, config.NUM_FLOW_BLOCKS)
-        
-        # Flot pour la dynamique p(z_{t+1}|z_t)
         self.dynamics_flow = NormalizingFlow(config.LATENT_DIM, config.COUPLING_HIDDEN_DIM, config.NUM_FLOW_BLOCKS, condition_dim=config.LATENT_DIM)
 
-        self.base_dist = torch.distributions.MultivariateNormal(
-            torch.zeros(config.LATENT_DIM).to(config.DEVICE), 
-            torch.eye(config.LATENT_DIM).to(config.DEVICE)
-        )
+        # ### CORRECTION ###
+        # Remplacement de MultivariateNormal par une distribution Normale factorisée
+        # pour une meilleure stabilité numérique.
+        self.register_buffer('base_dist_mean', torch.zeros(config.LATENT_DIM))
+        self.register_buffer('base_dist_var', torch.ones(config.LATENT_DIM))
+
+    @property
+    def base_dist(self):
+        return torch.distributions.Normal(self.base_dist_mean, self.base_dist_var)
 
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
-
     def forward(self, seq_imgs):
         b, s, c, h, w = seq_imgs.shape
         seq_imgs_flat = seq_imgs.view(b * s, c, h, w)
-        
         mu, logvar = self.encoder(seq_imgs_flat)
         z_seq = self.reparameterize(mu, logvar).view(b, s, -1)
-        
         recon_seq_imgs = self.decoder(z_seq)
-        
         return recon_seq_imgs, z_seq, mu.view(b,s,-1), logvar.view(b,s,-1)
 
-# --- 4. NOUVELLE Boucle d'Entraînement ---
+# --- 4. Boucle d'Entraînement ---
 
 def save_checkpoint(epoch, model, optimizer, scaler, config):
     state = {
@@ -367,7 +325,7 @@ def save_checkpoint(epoch, model, optimizer, scaler, config):
         'optimizer_state_dict': optimizer.state_dict(),
         'scaler_state_dict': scaler.state_dict(),
     }
-    filename = os.path.join(config.MODEL_SAVE_PATH, f"vaeflow_v2.0_checkpoint_epoch_{epoch}.pth")
+    filename = os.path.join(config.MODEL_SAVE_PATH, f"vaeflow_v2.1_checkpoint_epoch_{epoch}.pth")
     torch.save(state, filename)
     print(f"\nCheckpoint sauvegardé : {filename}")
 
@@ -412,28 +370,23 @@ def train_vaeflow():
                 with torch.amp.autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == "cuda")):
                     recon_seq_imgs, z_seq, _, _ = model(real_seq_imgs)
 
-                    # 1. Perte de Reconstruction
                     loss_rec_l1 = loss_l1(recon_seq_imgs, real_seq_imgs)
-                    loss_rec_lpips = loss_lpips_vgg(
-                        recon_seq_imgs.view(b*s, c, h, w), 
-                        real_seq_imgs.view(b*s, c, h, w)
-                    ).mean()
+                    loss_rec_lpips = loss_lpips_vgg(recon_seq_imgs.view(b*s, c, h, w), real_seq_imgs.view(b*s, c, h, w)).mean()
                     loss_reconstruction = config.LAMBDA_REC_L1 * loss_rec_l1 + config.LAMBDA_REC_LPIPS * loss_rec_lpips
 
-                    # 2. Perte du Prior p(z_0)
                     z_0 = z_seq[:, 0, :]
                     u_0, log_det_J_prior = model.prior_flow.forward(z_0)
-                    log_p_z0 = model.base_dist.log_prob(u_0) + log_det_J_prior
+                    # ### CORRECTION ### : On somme les log-probabilités sur la dimension latente
+                    log_p_z0 = model.base_dist.log_prob(u_0).sum(dim=-1) + log_det_J_prior
                     loss_prior = -log_p_z0.mean()
 
-                    # 3. Perte de la Dynamique p(z_{t+1}|z_t)
                     z_t = z_seq[:, :-1, :].reshape((s-1)*b, -1)
                     z_t_plus_1 = z_seq[:, 1:, :].reshape((s-1)*b, -1)
                     u_t_plus_1, log_det_J_dyn = model.dynamics_flow.forward(z_t_plus_1, condition=z_t)
-                    log_p_zt1_given_zt = model.base_dist.log_prob(u_t_plus_1) + log_det_J_dyn
+                    # ### CORRECTION ### : On somme les log-probabilités sur la dimension latente
+                    log_p_zt1_given_zt = model.base_dist.log_prob(u_t_plus_1).sum(dim=-1) + log_det_J_dyn
                     loss_dynamics = -log_p_zt1_given_zt.mean()
 
-                    # Perte totale
                     total_loss = loss_reconstruction + config.LAMBDA_PRIOR * loss_prior + config.LAMBDA_DYNAMICS * loss_dynamics
 
                 scaler.scale(total_loss).backward()
@@ -467,7 +420,7 @@ def train_vaeflow():
         gpu_monitor.shutdown()
     print("Entraînement terminé.")
 
-# --- 5. NOUVELLE Génération de Séquence ---
+# --- 5. Génération de Séquence ---
 
 def generate_sequence_vaeflow(model_path, priming_image_path, num_frames_to_generate, config):
     print("--- Démarrage de la Génération de Séquence (VAE-Flow) ---")
@@ -497,23 +450,20 @@ def generate_sequence_vaeflow(model_path, priming_image_path, num_frames_to_gene
     generated_z = []
     with torch.no_grad():
         with torch.amp.autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == "cuda")):
-            # Encoder l'image d'amorce pour obtenir le premier z_0
             mu, logvar = model.encoder(priming_tensor)
             z_t = model.reparameterize(mu, logvar)
             generated_z.append(z_t)
 
-            # Générer les z suivants de manière itérative
             for _ in range(num_frames_to_generate - 1):
-                # Échantillonner un bruit de la distribution de base
-                u_t = model.base_dist.sample().unsqueeze(0)
-                # Appliquer le flot de dynamique pour obtenir z_{t+1}
+                # ### CORRECTION ### : Échantillonnage adapté à la nouvelle distribution
+                # On échantillonne un batch de 1 vecteur de la distribution de base
+                u_t = model.base_dist.sample(sample_shape=(1,))
                 z_t, _ = model.dynamics_flow.inverse(u_t, condition=z_t)
                 generated_z.append(z_t)
             
-            z_full_seq = torch.cat(generated_z, dim=0).unsqueeze(0) # (1, S, D)
+            z_full_seq = torch.cat(generated_z, dim=0).unsqueeze(0)
             generated_imgs_seq = model.decoder(z_full_seq).squeeze(0)
 
-    # Sauvegarde des résultats
     video_path = os.path.join(config.OUTPUT_SAVE_PATH, "generated_sequence_vaeflow.mp4")
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     video_writer = cv2.VideoWriter(video_path, fourcc, 24, (config.IMG_SIZE, config.IMG_SIZE))
@@ -537,12 +487,12 @@ if __name__ == '__main__':
     config = Config()
     
     # --- Option 1: Entraîner le nouveau modèle VAE-Flow ---
-    print("\n--- MODE ENTRAÎNEMENT (v2.0 VAE-Flow) ---")
+    print("\n--- MODE ENTRAÎNEMENT (v2.1 VAE-Flow) ---")
     train_vaeflow()
 
     # --- Option 2: Générer avec le nouveau modèle VAE-Flow ---
-    # print("\n--- MODE GÉNÉRATION (v2.0 VAE-Flow) ---")
-    # model_file = "./models_vaeflow_v2.0/vaeflow_v2.0_checkpoint_epoch_150.pth" 
+    # print("\n--- MODE GÉNÉRATION (v2.1 VAE-Flow) ---")
+    # model_file = "./models_vaeflow_v2.1/vaeflow_v2.1_checkpoint_epoch_150.pth" 
     # priming_image = "chemin/vers/votre/image.png" # REMPLACEZ CECI
     
     # if os.path.exists(model_file) and os.path.exists(priming_image):
