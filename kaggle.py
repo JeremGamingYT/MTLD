@@ -2,7 +2,7 @@
 """
 MTLD: Modèle à Trajectoire Latente Déterministe pour la Restitution Séquentielle d'Anime
 
-Version: 2.0 (Compilation Conditionnelle & Robuste)
+Version: 2.1 (Correctif CUDAGraphs)
 Date: 03 novembre 2025
 """
 
@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.compiler
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 from PIL import Image
@@ -120,8 +121,8 @@ class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     NUM_WORKERS = 4
     
-    MODEL_SAVE_PATH = "./models_mtld_v2.0/"
-    OUTPUT_SAVE_PATH = "./outputs_mtld_v2.0/"
+    MODEL_SAVE_PATH = "./models_mtld_v2.1/"
+    OUTPUT_SAVE_PATH = "./outputs_mtld_v2.1/"
     SAVE_EPOCH_INTERVAL = 10
     
     RESUME_TRAINING = False
@@ -370,7 +371,7 @@ def save_checkpoint(epoch, model, opt_g, opt_d, scaler_g, scaler_d, config):
         'scaler_g_state_dict': scaler_g.state_dict(),
         'scaler_d_state_dict': scaler_d.state_dict(),
     }
-    filename = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v2.0_checkpoint_epoch_{epoch}.pth")
+    filename = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v2.1_checkpoint_epoch_{epoch}.pth")
     torch.save(state, filename)
     print(f"\nCheckpoint sauvegardé : {filename}")
 
@@ -385,17 +386,14 @@ def train_mtld():
     model = MTLD(config).to(config.DEVICE)
     
     # --- Optimisations de Performance Conditionnelles ---
+    compiled_mode = False
     if config.DEVICE == "cuda":
-        # Détecte la capacité de calcul du GPU
         major, _ = torch.cuda.get_device_capability()
-        
-        # Active le benchmark cuDNN pour accélérer les convolutions avec des tailles d'entrée fixes.
         torch.backends.cudnn.benchmark = True
 
-        # Applique torch.compile() uniquement sur les GPU compatibles (Capacité >= 7.0)
         if major >= 7:
             print("GPU compatible détecté (Capacité >= 7.0). Compilation du modèle avec torch.compile()...")
-            # Le mode 'reduce-overhead' est un bon compromis qui réduit l'overhead de Python.
+            compiled_mode = True
             model.encoder = torch.compile(model.encoder, mode="reduce-overhead")
             model.decoder = torch.compile(model.decoder, mode="reduce-overhead")
             model.trajectory_generator = torch.compile(model.trajectory_generator, mode="reduce-overhead")
@@ -449,6 +447,9 @@ def train_mtld():
         for epoch in range(start_epoch, config.EPOCHS):
             pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.EPOCHS}")
             for i, real_seq_imgs in enumerate(pbar):
+                if compiled_mode:
+                    torch.compiler.cudagraph_mark_step_begin()
+
                 real_seq_imgs = real_seq_imgs.to(config.DEVICE)
                 b, s, c, h, w = real_seq_imgs.shape
                 
