@@ -10,5 +10,8 @@ videos/
 videos_raw/
 .venv/
 .venv
-*.pth
+mtld_v1.4_*.pth
+mtld_v1.5_*.pth
+mtld_epoch_20.pth
+*pth
 kaggle/
