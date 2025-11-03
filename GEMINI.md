@@ -23,7 +23,7 @@ The project relies on several Python libraries. You can install them using pip.
 # It is recommended to use a virtual environment
 python -m venv .venv
 source .venv/bin/activate # On Linux/macOS
-# .\\.venv\\Scripts\\activate # On Windows
+# .\.venv\Scripts\activate # On Windows
 
 pip install torch torchvision
 pip install lpips
@@ -100,3 +100,25 @@ To generate a new sequence from a trained model:
 *   **Training Logic:** The main training loop is encapsulated in a `train_mtld()` function.
 *   **Inference Logic:** Generation is handled by the `generate_sequence()` function.
 *   **Multi-GPU:** `train_distributed.py` provides an implementation for multi-GPU training using `DistributedDataParallel`.
+
+## Troubleshooting
+
+### `TypeError: expected np.ndarray (got numpy.ndarray)`
+
+This error can occur during data loading (`DataLoader`) if there are conflicting versions of the `numpy` library installed in your environment, often introduced by dependencies like `opencv-python` and `torchvision`.
+
+**Solution:**
+
+To resolve this, you need to force the reinstallation of `numpy` and related packages to ensure a single, consistent version is used. If you are in a shell, run:
+
+```bash
+pip install --upgrade --force-reinstall numpy opencv-python torchvision
+```
+
+If you are in a Jupyter or Colab Notebook, run the following command in a cell:
+
+```python
+!pip install --upgrade --force-reinstall numpy opencv-python torchvision
+```
+
+After running the command, **restart the kernel** of your notebook to ensure the newly installed libraries are loaded correctly.
