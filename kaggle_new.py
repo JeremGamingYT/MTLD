@@ -163,7 +163,7 @@ class Config:
     # --- Reprise d'entraînement ---
     RESUME_TRAINING = True # Mettre à True pour charger le checkpoint
     # Mettez ici le chemin vers votre checkpoint v1.8 de 100 époques
-    CHECKPOINT_TO_RESUME = "./MTLD/mtld_v1.8_checkpoint_epoch_100.pth" 
+    CHECKPOINT_TO_RESUME = "./mtld_v1.8_checkpoint_epoch_100.pth" 
     LOAD_STRICT = False # NOUVEAU: Charger les poids de manière non-stricte
     # Taux d'apprentissage pour les nouvelles couches (Attention, VAE) lors de la reprise
     NEW_LAYERS_LR_FACTOR = 10.0 
