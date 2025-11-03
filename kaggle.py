@@ -2,8 +2,8 @@
 """
 MTLD: Modèle à Trajectoire Latente Déterministe pour la Restitution Séquentielle d'Anime
 
-Version: 1.8 (Pré-chargement du Dataset en RAM)
-Date: 01 novembre 2025
+Version: 1.9 (Optimisation avec torch.compile)
+Date: 03 novembre 2025
 """
 
 # --- 1. Importations et Configuration ---
@@ -120,8 +120,8 @@ class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     NUM_WORKERS = 4
     
-    MODEL_SAVE_PATH = "./models_mtld_v1.8/"
-    OUTPUT_SAVE_PATH = "./outputs_mtld_v1.8/"
+    MODEL_SAVE_PATH = "./models_mtld_v1.9/"
+    OUTPUT_SAVE_PATH = "./outputs_mtld_v1.9/"
     SAVE_EPOCH_INTERVAL = 10
     
     RESUME_TRAINING = False
@@ -370,7 +370,7 @@ def save_checkpoint(epoch, model, opt_g, opt_d, scaler_g, scaler_d, config):
         'scaler_g_state_dict': scaler_g.state_dict(),
         'scaler_d_state_dict': scaler_d.state_dict(),
     }
-    filename = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v1.8_checkpoint_epoch_{epoch}.pth")
+    filename = os.path.join(config.MODEL_SAVE_PATH, f"mtld_v1.9_checkpoint_epoch_{epoch}.pth")
     torch.save(state, filename)
     print(f"\nCheckpoint sauvegardé : {filename}")
 
@@ -384,6 +384,20 @@ def train_mtld():
     
     model = MTLD(config).to(config.DEVICE)
     
+    # --- Optimisations de Performance ---
+    # Active le benchmark cuDNN pour accélérer les convolutions avec des tailles d'entrée fixes.
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+
+    # Applique torch.compile() pour une accélération significative (PyTorch 2.0+)
+    # Le mode 'reduce-overhead' est un bon compromis qui réduit l'overhead de Python.
+    print("Compilation du modèle avec torch.compile()... (peut prendre un moment la première fois)")
+    model.encoder = torch.compile(model.encoder, mode="reduce-overhead")
+    model.decoder = torch.compile(model.decoder, mode="reduce-overhead")
+    model.trajectory_generator = torch.compile(model.trajectory_generator, mode="reduce-overhead")
+    model.discriminator = torch.compile(model.discriminator, mode="reduce-overhead")
+    # --- Fin des Optimisations ---
+
     g_params = list(model.encoder.parameters()) + list(model.decoder.parameters()) + list(model.trajectory_generator.parameters())
     d_params = list(model.discriminator.parameters())
     opt_g = optim.Adam(g_params, lr=config.LEARNING_RATE_G, betas=(config.BETA1, config.BETA2))
