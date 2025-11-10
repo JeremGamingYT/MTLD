@@ -703,31 +703,31 @@ def generate_sequence(model_path, priming_image_path, num_frames_to_generate, co
 if __name__ == '__main__':
     cfg = Config()
     # --- MODE ENTRAÎNEMENT ---
-    # print(f"\n--- MODE ENTRAÎNEMENT (v2.0 TFC-NCD + RPC) ---")
-    # train_mtld()
+    print(f"\n--- MODE ENTRAÎNEMENT (v2.0 TFC-NCD + RPC) ---")
+    train_mtld()
 
     # --- MODE GÉNÉRATION ---
-    print("\n--- MODE GÉNÉRATION (v2.0) ---")
+    #print("\n--- MODE GÉNÉRATION (v2.0) ---")
     # Exemple: on cherche une image d'amorce depuis le dataset
-    try:
-        dataset_tmp = AnimeFrameDataset(cfg.DATASET_PATH, 1, transform=transforms.Compose([
-            transforms.Resize((cfg.IMG_SIZE, cfg.IMG_SIZE)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-        ]), config=cfg)
-        priming_image = dataset_tmp.sequences[0][0] 
-        print(f"Utilisation de l'image d'amorce : {priming_image}")
-    except Exception as e:
-        print(f"ATTENTION: Impossible de trouver une image d'amorce par défaut : {e}. Spécifiez un chemin valide.")
-        priming_image = "frame_0001.png"  # à remplacer
+    #try:
+    #    dataset_tmp = AnimeFrameDataset(cfg.DATASET_PATH, 1, transform=transforms.Compose([
+    #        transforms.Resize((cfg.IMG_SIZE, cfg.IMG_SIZE)),
+    #        transforms.ToTensor(),
+    #        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+    #    ]), config=cfg)
+    #    priming_image = dataset_tmp.sequences[0][0] 
+    #    print(f"Utilisation de l'image d'amorce : {priming_image}")
+    #except Exception as e:
+    #    print(f"ATTENTION: Impossible de trouver une image d'amorce par défaut : {e}. Spécifiez un chemin valide.")
+    #    priming_image = "frame_0001.png"  # à remplacer
 
-    model_file = os.path.join(cfg.MODEL_SAVE_PATH, "mtld_v2.0_checkpoint_epoch_100.pth")
-    if os.path.exists(priming_image) and os.path.exists(model_file):
-        generate_sequence(
-            model_path=model_file,
-            priming_image_path=priming_image,
-            num_frames_to_generate=100,
-            config=cfg
-        )
-    else:
-        print("Note: modèle ou image d'amorce manquants pour la génération de démo.")
+    #model_file = os.path.join(cfg.MODEL_SAVE_PATH, "mtld_v2.0_checkpoint_epoch_100.pth")
+    #if os.path.exists(priming_image) and os.path.exists(model_file):
+    #    generate_sequence(
+    #        model_path=model_file,
+    #        priming_image_path=priming_image,
+    #        num_frames_to_generate=100,
+    #        config=cfg
+    #    )
+    #else:
+    #    print("Note: modèle ou image d'amorce manquants pour la génération de démo.")
