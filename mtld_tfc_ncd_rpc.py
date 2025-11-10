@@ -108,7 +108,7 @@ class GPUMonitor:
 
 class Config:
     # Données
-    DATASET_PATH = "/root/.cache/kagglehub/datasets/jeremgaming099/anima-s-dataset/versions/6/animes_dataset"
+    DATASET_PATH = "/kaggle/input/anima-s-dataset/animes_dataset"
     PRELOAD_DATASET_IN_RAM = True
 
     # Image
