@@ -15,3 +15,11 @@ mtld_v1.5_*.pth
 mtld_epoch_20.pth
 *pth
 kaggle/
+/best*
+/outputs_*
+mtld_sacd_hgu_v3_nb_2_cond_fix.py
+mtld_sacd_hgu_v3_nb_2.py
+update-code.py
+mtld_sacd_hgu_v3_nb.py
+mtld_sacd_hgu_v3.py
+mtld_tfc_ncd_rpc_v2_fix_cli.py
