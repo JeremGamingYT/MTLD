@@ -86,7 +86,7 @@ class GPUMonitor:
 
 class Config:
     # --- Original hyperparams ---
-    DATASET_PATH = "animes_dataset"
+    DATASET_PATH = "/root/.cache/kagglehub/datasets/jeremgaming099/anima-s-dataset/versions/7"
     PRELOAD_DATASET_IN_RAM = True
     IMG_SIZE = 256
     IMG_CHANNELS = 3
