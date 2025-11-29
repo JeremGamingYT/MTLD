@@ -144,9 +144,11 @@ class Decoder(nn.Module):
         feat_dim: int = 128,
         out_channels: int = 3,
         seq_len: int = 16,
+        frame_size: int = 64,
     ) -> None:
         super().__init__()
         self.seq_len = seq_len
+        self.frame_size = frame_size
         # Project latent and conditioning image to initial hidden state
         self.init_fc = nn.Linear(latent_dim + cond_dim, hidden_dim)
         # Project latent and conditioning image to GRU input
@@ -154,15 +156,45 @@ class Decoder(nn.Module):
         self.gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
         # Map hidden states to frame features
         self.out_fc = nn.Linear(hidden_dim, feat_dim)
-        # Frame decoder (transpose conv)
-        self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(feat_dim, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(64, out_channels, kernel_size=4, stride=2, padding=1),
-            nn.Tanh(),
+        # Build a dynamic upsampling decoder. We start from a 1×1 feature map
+        # and repeatedly upsample by factor 2 until reaching the target spatial
+        # resolution. Between upsampling steps we apply a convolution to
+        # gradually decrease the number of channels.
+        import math
+        num_upsamples = int(math.log2(frame_size))
+        assert 2 ** num_upsamples == frame_size, (
+            f"frame_size must be a power of 2, got {frame_size}"
         )
+        # Define a sequence of output channels for each intermediate layer.
+        # Start with feat_dim and progressively decrease. The final layer
+        # produces out_channels.
+        hidden_dims = []
+        # We'll create (num_upsamples - 1) hidden layers before the final output
+        # Choose a simple geometric progression if possible
+        # Example for frame_size=64 (num_upsamples=6): hidden_dims length =5
+        # Values: 256, 128, 64, 32, 16
+        base = 256
+        for _ in range(max(num_upsamples - 1, 0)):
+            hidden_dims.append(base)
+            base = max(base // 2, out_channels)
+        # If the list is shorter than needed, fill with out_channels
+        while len(hidden_dims) < max(num_upsamples - 1, 0):
+            hidden_dims.append(out_channels)
+        # Build convolution layers
+        layers = []
+        in_ch = feat_dim
+        for i in range(num_upsamples):
+            # Determine output channels: for all but last layer, pick from
+            # hidden_dims; final layer outputs out_channels
+            if i < num_upsamples - 1:
+                out_ch = hidden_dims[i]
+            else:
+                out_ch = out_channels
+            layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1))
+            in_ch = out_ch
+        self.conv_layers = nn.ModuleList(layers)
+        self.activation = nn.ReLU(inplace=True)
+        self.final_activation = nn.Tanh()
 
     def forward(self, z: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         """Decode latent and conditioning into frames.
@@ -184,12 +216,22 @@ class Decoder(nn.Module):
         # Frame features
         feats = self.out_fc(out)  # (B, T, feat_dim)
         # Decode each feature to an image
-        frames = []
+        frames: list[torch.Tensor] = []
         for t in range(self.seq_len):
             f = feats[:, t]
+            # Start from a (B, feat_dim, 1, 1) tensor
             f = f.view(B, -1, 1, 1)
-            img = self.deconv(f)
-            frames.append(img)
+            x = f
+            for i, conv in enumerate(self.conv_layers):
+                # Upsample if not the first iteration; upsampling is done
+                # before the convolution except for the first layer
+                x = F.interpolate(x, scale_factor=2, mode="nearest")
+                x = conv(x)
+                if i < len(self.conv_layers) - 1:
+                    x = self.activation(x)
+                else:
+                    x = self.final_activation(x)
+            frames.append(x)
         return torch.stack(frames, dim=1)
 
 
@@ -218,6 +260,7 @@ class Image2VideoVAE(nn.Module):
             feat_dim=feat_dim,
             out_channels=in_channels,
             seq_len=seq_len,
+            frame_size=frame_size,
         )
 
     def forward(self, cond_img: torch.Tensor, target_seq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
