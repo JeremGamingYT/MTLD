@@ -106,7 +106,12 @@ class AnimeVideoDataset(Dataset):
 
 def train_anime_model():
     dataset = AnimeVideoDataset(VIDEO_DIR, num_frames=32, frame_size=FRAME_SIZE)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    # MediaPipe n'est pas thread‑safe lorsque l'on utilise plusieurs processus.  Le fait de
+    # lancer des DataLoader workers en parallèle peut provoquer des erreurs de mutex ou
+    # des crashs dans les bibliothèques (cf. logs).  Pour éviter ce problème, nous
+    # utilisons un seul worker en définissant num_workers=0.  Cela peut ralentir
+    # légèrement le chargement, mais assure la stabilité.
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
 
     # Initialisation du modèle
     model = AnimeModel(num_joints=NUM_JOINTS, vae_latent_dim=VAE_LATENT_DIM, generator_style_dim=STYLE_DIM)
