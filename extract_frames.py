@@ -47,13 +47,13 @@ def extract_frames_from_video(video_path: Path, anime_name: str):
     # 1. fps=BASE_FPS → on commence par baisser le débit d’images
     # 2. mpdecimate=hi=64:lo=32:frac=0.2 → plus agressif que le défaut
     # 3. select=gt(scene,SCENE_THRESHOLD) → on garde les frames où ça bouge vraiment
-    # 4. scale + pad → pour avoir 256x256 sans déformer
+    # 4. scale + pad → pour avoir 1920x1080 sans déformer
     vf_filter = (
         f"fps={BASE_FPS},"
         "mpdecimate=hi=64:lo=32:frac=0.2,"
         f"select='gt(scene,{SCENE_THRESHOLD})',"
-        "scale=256:-1:force_original_aspect_ratio=decrease,"
-        "pad=256:256:(256-iw)/2:(256-ih)/2:black,"
+        "scale=1920:1080:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(1920-iw)/2:(1080-ih)/2:black,"
         "setpts=N/FRAME_RATE/TB"
     )
 
