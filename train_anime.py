@@ -106,12 +106,7 @@ class AnimeVideoDataset(Dataset):
 
 def train_anime_model():
     dataset = AnimeVideoDataset(VIDEO_DIR, num_frames=32, frame_size=FRAME_SIZE)
-    # MediaPipe n'est pas thread‑safe lorsque l'on utilise plusieurs processus.  Le fait de
-    # lancer des DataLoader workers en parallèle peut provoquer des erreurs de mutex ou
-    # des crashs dans les bibliothèques (cf. logs).  Pour éviter ce problème, nous
-    # utilisons un seul worker en définissant num_workers=0.  Cela peut ralentir
-    # légèrement le chargement, mais assure la stabilité.
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
 
     # Initialisation du modèle
     model = AnimeModel(num_joints=NUM_JOINTS, vae_latent_dim=VAE_LATENT_DIM, generator_style_dim=STYLE_DIM)
@@ -187,8 +182,10 @@ def generate_anime_video(input_video: str, output_path: str,
         img = T.ToTensor()(Image.fromarray(frame_rgb)).unsqueeze(0).to(DEVICE)
         img = T.Resize(FRAME_SIZE)(img)
         # extraire squelette
-        kp = skeleton_extractor.extract_keypoints(img)[0:1]
-        hmap = skeleton_extractor.keypoints_to_heatmaps(kp.unsqueeze(0), FRAME_SIZE)
+        # MediaPipe retourne un tenseur de forme (1, K, 2).  On le passe
+        # directement à `keypoints_to_heatmaps` sans ajout de dimensions
+        kp = skeleton_extractor.extract_keypoints(img)  # shape (1, K, 2)
+        hmap = skeleton_extractor.keypoints_to_heatmaps(kp, FRAME_SIZE)
         # échantillonner un style aléatoire ou utiliser la moyenne
         style_vec = torch.randn(1, STYLE_DIM, device=DEVICE)
         with torch.no_grad():
