@@ -14,11 +14,16 @@ sequences given a single conditioning image.
 
 Usage (from a terminal or notebook cell)::
 
+    # Train the baseline VAE (simpler but less detailed)
     python train_vae.py --dataset ./anime_clips --epochs 10 --batch-size 4 \
-        --seq-len 16 --frame-size 64 --save-dir ./outputs
+        --seq-len 16 --frame-size 64 --model-type vae --save-dir ./outputs
+
+    # Train the U‑Net VAE (better detail preservation)
+    python train_vae.py --dataset ./anime_clips --epochs 10 --batch-size 4 \
+        --seq-len 16 --frame-size 64 --model-type unet-vae --save-dir ./outputs
 
 The script will traverse the ``dataset`` directory, extract fixed
-length sequences from each video, train the VAE model, and write
+length sequences from each video, train the chosen model, and write
 sample animations after each epoch.  Logs are printed to stdout
 and can be captured in a notebook for inspection.  If GPU is
 available (CUDA), it will be used automatically.
@@ -48,7 +53,9 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
+# Import both models.  They define the same API but use different architectures.
 from image2video_vae import Image2VideoVAE
+from image2video_unet_vae import Image2VideoUNetVAE
 
 
 class VideoSequenceDataset(Dataset):
@@ -253,6 +260,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-weight", type=float, default=1e-3, help="Weight for KL divergence term")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate for Adam optimizer")
     parser.add_argument("--save-dir", type=str, default="samples", help="Directory to save sample outputs")
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="vae",
+        choices=["vae", "unet-vae"],
+        help="Type of model architecture to use: 'vae' or 'unet-vae'",
+    )
+    parser.add_argument(
+        "--base-dim",
+        type=int,
+        default=64,
+        help="Base dimension for convolution layers (used in unet-vae).",
+    )
+    parser.add_argument(
+        "--cond-dim",
+        type=int,
+        default=256,
+        help="Dimension of conditioning image embedding.",
+    )
+    parser.add_argument(
+        "--hidden-dim",
+        type=int,
+        default=512,
+        help="Hidden size for GRU and sequence encoder (unet-vae).",
+    )
+    parser.add_argument(
+        "--latent-dim",
+        type=int,
+        default=128,
+        help="Latent dimensionality (unet-vae).",
+    )
     return parser.parse_args()
 
 
@@ -281,16 +319,29 @@ def main() -> None:
         num_workers=0,  # Use single worker for notebook compatibility
         drop_last=True,
     )
-    # Instantiate model
-    model = Image2VideoVAE(
-        frame_size=args.frame_size,
-        seq_len=args.seq_len,
-        in_channels=3,
-        cond_dim=256,
-        feat_dim=128,
-        hidden_dim=256,
-        latent_dim=64,
-    )
+    # Instantiate model according to args.model_type
+    if args.model_type == "vae":
+        model = Image2VideoVAE(
+            frame_size=args.frame_size,
+            seq_len=args.seq_len,
+            in_channels=3,
+            cond_dim=args.cond_dim,
+            feat_dim=128,
+            hidden_dim=args.hidden_dim,
+            latent_dim=args.latent_dim,
+        )
+    elif args.model_type == "unet-vae":
+        model = Image2VideoUNetVAE(
+            frame_size=args.frame_size,
+            seq_len=args.seq_len,
+            in_channels=3,
+            base_dim=args.base_dim,
+            cond_dim=args.cond_dim,
+            hidden_dim=args.hidden_dim,
+            latent_dim=args.latent_dim,
+        )
+    else:
+        raise ValueError(f"Unknown model type: {args.model_type}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     train(
