@@ -39,7 +39,7 @@ from anime_model import SkeletonExtractor, AnimeModel
 # -----------------------------------------------------------------------------
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-VIDEO_DIR = "/path/to/anime/videos"  # dossier contenant des vidéos .mp4 d'environ 20 s
+VIDEO_DIR = "/kaggle/input/animes-videos"  # dossier contenant des vidéos .mp4 d'environ 20 s
 FRAME_SIZE = (256, 256)
 NUM_JOINTS = 33  # nombre de keypoints utilisés par MediaPipe
 VAE_LATENT_DIM = 64
